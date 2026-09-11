@@ -21,6 +21,10 @@
 
 #include "MjDecompositionMenu.h"
 
+// Not transitively included: this TU logs to LogURLabEditor, and only unity
+// batching made the category visible here before (a neighbour's include).
+#include "URLabEditorLogging.h"
+
 #include "GameFramework/Actor.h"
 #include "Engine/Blueprint.h"
 #include "Engine/SCS_Node.h"

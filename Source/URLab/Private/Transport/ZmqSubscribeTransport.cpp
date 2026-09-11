@@ -21,6 +21,8 @@
 // CoACD (MIT), and libzmq (MPL 2.0). See ThirdPartyNotices.txt for details.
 
 #include "Transport/ZmqSubscribeTransport.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 #include "MuJoCo/Core/MjArticulation.h"
 #include "MuJoCo/Spec/MjNodeComponent.h"
 #include "MuJoCo/Core/AMjManager.h"
@@ -51,12 +53,39 @@ void UURLabZmqSubscribeTransport::TransportShutdown()
 	ShutdownZmqSocket();
 }
 
+namespace
+{
+// Farm isolation for the legacy subscriber, matching the bridge's
+// ApplyEnvAndCommandLineOverrides: the manager auto-creates this transport
+// with fixed default endpoints, so on a multi-instance host the command
+// line is the only per-instance channel for these two ports.
+FString OverrideEndpointPort(const FString& Endpoint, const TCHAR* Switch)
+{
+	int32 Port = 0;
+	if (!FParse::Value(FCommandLine::Get(), Switch, Port) || Port <= 0)
+	{
+		return Endpoint;
+	}
+	int32 ColonIndex = INDEX_NONE;
+	if (!Endpoint.FindLastChar(TEXT(':'), ColonIndex))
+	{
+		return Endpoint;
+	}
+	return Endpoint.Left(ColonIndex + 1) + FString::FromInt(Port);
+}
+} // namespace
+
 void UURLabZmqSubscribeTransport::InitZmqSocket()
 {
 	if (bIsInitialized)
 		return;
 
 	ZmqContext = zmq_ctx_new();
+
+	// Per-instance overrides for multi-sim hosts (see the bridge's
+	// URLabStepPort / URLabStatePort / URLabCamBasePort counterparts).
+	ControlEndpoint = OverrideEndpointPort(ControlEndpoint, TEXT("URLabCtrlPort="));
+	InfoEndpoint = OverrideEndpointPort(InfoEndpoint, TEXT("URLabInfoPort="));
 
 	// Setup Subscriber (Controls)
 	ControlSubscriber = zmq_socket(ZmqContext, ZMQ_SUB);

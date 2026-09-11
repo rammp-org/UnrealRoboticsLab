@@ -29,6 +29,11 @@ endif()
 if(WIN32)
   set(MUJOCO_IMPORT_LIB "${MUJOCO_LIB_DIR}/mujoco.lib")
   set(MUJOCO_DLL        "${MUJOCO_BIN_DIR}/mujoco.dll")
+elseif(APPLE)
+  # The unversioned .dylib is the symlink; linking it records the install
+  # name rather than an absolute versioned path.
+  set(MUJOCO_IMPORT_LIB "${MUJOCO_LIB_DIR}/libmujoco.dylib")
+  set(MUJOCO_DLL        "${MUJOCO_IMPORT_LIB}")
 else()
   # The unversioned .so is the symlink; linking it records the SONAME rather
   # than an absolute versioned path.

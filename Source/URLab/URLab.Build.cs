@@ -208,7 +208,20 @@ public class URLab : ModuleRules
 
 	private string ThirdPartyPath
 	{
-		get { return Path.Combine(PluginDirectory, "third_party", "install"); }
+		get
+		{
+			// Windows->Linux cross-compilation reads Linux-built third-party
+			// artifacts from install-linux/ (produced by the host project's
+			// Scripts/build_all_linux_cross.ps1). A separate root is required
+			// because each dep build wipes its own install dir, so Linux and
+			// Windows artifacts sharing install/ would clobber each other.
+			if (Target.Platform == UnrealTargetPlatform.Linux &&
+				BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64)
+			{
+				return Path.Combine(PluginDirectory, "third_party", "install-linux");
+			}
+			return Path.Combine(PluginDirectory, "third_party", "install");
+		}
 	}
 
 	private void AddThirdPartyLibrary(string LibraryName, ReadOnlyTargetRules Target)
@@ -308,6 +321,29 @@ public class URLab : ModuleRules
 					RuntimeDependencies.Add(BinFile);
 					PublicDelayLoadDLLs.Add(Path.GetFileName(BinFile));
 					PublicAdditionalLibraries.Add(BinFile);
+				}
+			}
+		}
+		else if (Target.Platform == UnrealTargetPlatform.Mac)
+		{
+			// The third-party dylibs carry @rpath install names
+			// (@rpath/libzmq.5.dylib etc), and UBT's Mac toolchain adds a
+			// @loader_path-relative RPATH entry for every linked dylib that
+			// lives outside the engine tree, so linking straight from
+			// third_party/install/<pkg>/lib resolves at editor runtime with
+			// no extra staging step. Skip symlinks (libzmq.dylib ->
+			// libzmq.5.2.6.dylib) so each library is linked exactly once.
+			string LibPath = Path.Combine(FullPath, "lib");
+			if (Directory.Exists(LibPath))
+			{
+				foreach (string LibFile in Directory.GetFiles(LibPath, "*.dylib", SearchOption.AllDirectories))
+				{
+					if (File.GetAttributes(LibFile).HasFlag(FileAttributes.ReparsePoint))
+					{
+						continue;
+					}
+					PublicAdditionalLibraries.Add(LibFile);
+					RuntimeDependencies.Add("$(BinaryOutputDir)/" + Path.GetFileName(LibFile), LibFile, StagedFileType.NonUFS);
 				}
 			}
 		}

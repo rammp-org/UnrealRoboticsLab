@@ -30,16 +30,20 @@
 // rpclib's msgpack-cxx headers use member functions and templates named
 // `check`, which collides with UE's `check(cond)` assertion macro. Save
 // the macro, undef while including rpclib, and restore afterwards. We do
-// the same for `verify` for safety.
+// the same for `verify` for safety, and for `nil` on Apple platforms,
+// where MacTypes.h defines `nil` and breaks msgpack's `typedef nil_t nil`.
 #pragma push_macro("check")
 #pragma push_macro("verify")
+#pragma push_macro("nil")
 #undef check
 #undef verify
+#undef nil
 
 THIRD_PARTY_INCLUDES_START
 #include "rpc/msgpack.hpp"
 THIRD_PARTY_INCLUDES_END
 
+#pragma pop_macro("nil")
 #pragma pop_macro("verify")
 #pragma pop_macro("check")
 

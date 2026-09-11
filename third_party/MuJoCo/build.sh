@@ -76,10 +76,10 @@ cmake --install . --config "$BUILD_TYPE"
 PLUGIN_OUT="$INSTALL_DIR/lib/mujoco_plugin"
 mkdir -p "$PLUGIN_OUT"
 PLUGIN_COUNT=0
-for LIB in lib/*.so bin/*.so; do
+for LIB in lib/*.so bin/*.so lib/*.dylib bin/*.dylib; do
     [ -e "$LIB" ] || continue
     case "$(basename "$LIB")" in
-        libmujoco.so*) continue ;;
+        libmujoco.so* | libmujoco.dylib | libmujoco.*.dylib) continue ;;
     esac
     cp -f "$LIB" "$PLUGIN_OUT/"
     echo "Installed plugin $(basename "$LIB")"

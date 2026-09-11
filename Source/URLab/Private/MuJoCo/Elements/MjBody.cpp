@@ -139,6 +139,19 @@ void UMjBody::ApplyRenderState(const FMjRenderSnapshot& Snap)
 		return;
 	}
 
+	// The world body is not a pose to copy: an articulation's worldbody
+	// component is the actor-relative container of authored content (mocap
+	// targets, static geoms), and body id 0's snapshot pose is always the
+	// MuJoCo origin. Driving it pins that whole subtree to the world origin
+	// the moment the actor sits anywhere else -- a mocap child then pushes
+	// the origin back into the model and the scene welds itself there.
+	// Every bound child body sets its own world transform from the snapshot
+	// regardless, so skipping the world body loses nothing.
+	if (Id == 0)
+	{
+		return;
+	}
+
 	const int32 PosIdx = Id * 3;
 	const int32 QuatIdx = Id * 4;
 	if (Snap.XPos.Num() <= PosIdx + 2 || Snap.XQuat.Num() <= QuatIdx + 3)

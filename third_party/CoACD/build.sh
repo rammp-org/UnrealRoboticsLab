@@ -65,7 +65,7 @@ mkdir -p build
 cd build
 
 echo "Configuring CoACD..."
-cmake .. -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DWITH_3RD_PARTY_LIBS=ON
+cmake .. -DCMAKE_INSTALL_PREFIX="$INSTALL_DIR" -DCMAKE_BUILD_TYPE="$BUILD_TYPE" -DWITH_3RD_PARTY_LIBS=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5
 
 echo "Building CoACD..."
 cmake --build . --config "$BUILD_TYPE" --target _coacd
