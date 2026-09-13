@@ -507,14 +507,14 @@ void UMjQuickConvertComponent::AuthorSceneSpec()
 			// The visual hull is the undecomposed mesh with contact switched
 			// off: it exists so the viewer sees the shape the artist made
 			// rather than the decomposition that collides.
-			for (const FMjConvertedHull& Hull : ExportHulls(*Smc, Owner->GetName(), false, CoACDThreshold))
+			const TArray<FMjConvertedHull> VisualHulls = ExportHulls(*Smc, Owner->GetName(), false, CoACDThreshold);
+			if (VisualHulls.Num() > 0)
 			{
 				UMjGeomBase& Visual =
-					AddGeom(FString::Printf(TEXT("Geom_%d_visual"), MeshIndex), AddMeshAsset(Hull));
+					AddGeom(FString::Printf(TEXT("Geom_%d_visual"), MeshIndex), AddMeshAsset(VisualHulls[0]));
 				Visual.Contype = 0;
 				Visual.Conaffinity = 0;
 				Visual.Group = 2;
-				break;
 			}
 
 			int32 HullIndex = 0;

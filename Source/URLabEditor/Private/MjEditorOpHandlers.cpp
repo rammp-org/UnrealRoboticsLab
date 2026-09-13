@@ -300,10 +300,9 @@ TSharedPtr<FJsonObject> HandleEnsureManager(const TSharedPtr<FJsonObject>& /*Req
 		return MakeJsonError(TEXT("no_world"), TEXT("editor world unavailable"));
 
 	AAMjManager* Existing = nullptr;
-	for (TActorIterator<AAMjManager> It(World); It; ++It)
+	if (TActorIterator<AAMjManager> It(World); It)
 	{
 		Existing = *It;
-		break;
 	}
 	const bool bWasExisting = (Existing != nullptr);
 

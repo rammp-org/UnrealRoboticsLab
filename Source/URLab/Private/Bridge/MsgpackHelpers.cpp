@@ -109,7 +109,8 @@ void PackJsonObjectInner(clmdep_msgpack::packer<Stream>& Packer,
 	Packer.pack_map(Obj->Values.Num());
 	for (const auto& Kv : Obj->Values)
 	{
-		const FString& Key = Kv.Key;
+		// UE 5.8 keys FJsonObject::Values by TSharedString; *Key works on 5.7 and 5.8.
+		const FString Key(*Kv.Key);
 		// Keys with kBinSuffix emit real msgpack bin (the suffix is stripped from
 		// the wire field name). The value is either our raw-binary carrier
 		// (EJson::Null, bytes packed directly) or a legacy base64 string (from a
