@@ -120,8 +120,6 @@ void AMjOrbitCameraActor::SetTarget(AMjArticulation* NewTarget)
 		UMjBody* FirstNonDefault = nullptr;
 		for (UMjBody* B : Bodies)
 		{
-			if (false)
-				continue;
 			if (!FirstNonDefault)
 				FirstNonDefault = B;
 

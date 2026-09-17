@@ -305,7 +305,7 @@ TSharedPtr<FJsonObject> FURLabRpcDispatcher::HandleSetCameraStreaming(
 	//   { "zmq": b, "shm": b }  -> per-transport; an omitted sub-field is off
 	//                              UNLESS both are omitted, which means "both on"
 	TMap<FString, TPair<bool, bool>> Requests; // key -> {zmq, shm}
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Kv : (*CamObj)->Values)
+	for (const auto& Kv : (*CamObj)->Values)
 	{
 		if (!Kv.Value.IsValid())
 			continue;
@@ -330,7 +330,7 @@ TSharedPtr<FJsonObject> FURLabRpcDispatcher::HandleSetCameraStreaming(
 			}
 			// else leave both true (default = enable both)
 		}
-		Requests.Add(Kv.Key, TPair<bool, bool>(bZmq, bShm));
+		Requests.Add(FString(*Kv.Key), TPair<bool, bool>(bZmq, bShm));
 	}
 
 	if (Requests.Num() == 0)
@@ -397,7 +397,7 @@ TSharedPtr<FJsonObject> FURLabRpcDispatcher::HandleSetCameraDelay(
 	// Parse per-camera requests. A bare number means delay_s with defaults; an
 	// object carries delay_s / jitter_s / clock / seed / on_state_change / max_fps.
 	TMap<FString, FCameraDelayReq> Requests;
-	for (const TPair<FString, TSharedPtr<FJsonValue>>& Kv : (*CamObj)->Values)
+	for (const auto& Kv : (*CamObj)->Values)
 	{
 		if (!Kv.Value.IsValid())
 			continue;
@@ -435,7 +435,7 @@ TSharedPtr<FJsonObject> FURLabRpcDispatcher::HandleSetCameraDelay(
 				R.bSetCapture = true;
 			}
 		}
-		Requests.Add(Kv.Key, R);
+		Requests.Add(FString(*Kv.Key), R);
 	}
 
 	if (Requests.Num() == 0)

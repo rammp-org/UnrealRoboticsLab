@@ -204,7 +204,7 @@ TSharedPtr<FJsonObject> FURLabRpcDispatcher::HandleSetUserChannels(const TShared
 						  const FString& RejectPrefix) {
 		if (!Channels.IsValid())
 			return;
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& Pair : Channels->Values)
+		for (const auto& Pair : Channels->Values)
 		{
 			const FName Channel(*Pair.Key);
 			FMjUserChannel Value;
@@ -225,11 +225,11 @@ TSharedPtr<FJsonObject> FURLabRpcDispatcher::HandleSetUserChannels(const TShared
 	const TSharedPtr<FJsonObject>* ArtsObj = nullptr;
 	if (Req->TryGetObjectField(TEXT("arts"), ArtsObj))
 	{
-		for (const TPair<FString, TSharedPtr<FJsonValue>>& ArtPair : (*ArtsObj)->Values)
+		for (const auto& ArtPair : (*ArtsObj)->Values)
 		{
 			const TSharedPtr<FJsonObject>* ArtChannels = nullptr;
 			if (ArtPair.Value.IsValid() && ArtPair.Value->TryGetObject(ArtChannels))
-				ApplyScope(*ArtChannels, FName(*ArtPair.Key), ArtPair.Key + TEXT("/"));
+				ApplyScope(*ArtChannels, FName(*ArtPair.Key), FString(*ArtPair.Key) + TEXT("/"));
 		}
 	}
 

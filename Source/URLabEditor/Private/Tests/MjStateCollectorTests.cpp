@@ -393,10 +393,9 @@ bool FMjStateSensorRawParity::RunTest(const FString& Parameters)
 	const TArray<double>* IRValues = nullptr;
 	for (const FMjArticulationState& AS : Snap.Articulations)
 	{
-		for (const FMjSensorState& Sen : AS.Sensors)
+		if (AS.Sensors.Num() > 0)
 		{
-			IRValues = &Sen.Values;
-			break;
+			IRValues = &AS.Sensors[0].Values;
 		}
 		if (IRValues)
 			break;
