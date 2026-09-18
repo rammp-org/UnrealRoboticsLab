@@ -164,6 +164,19 @@ public class URLab : ModuleRules
 		string Root = Path.Combine(ThirdPartyPath, "protospec");
 		string IncludePath = Path.Combine(Root, "include");
 		string LibPath = Path.Combine(Root, "lib");
+
+		// UBT caches the makefile and only re-evaluates this Build.cs when a
+		// registered dependency changes. Staging ProtoSpec creates files but
+		// touches nothing UBT already watches (the drift checks watch the git
+		// index and each dep's INSTALLED_SHA.txt, none of which move), so without
+		// these the next build silently reuses the URLAB_PROTOSPEC=0 makefile and
+		// fails in Gen/ with 'Cannot open include file' exactly as it did before
+		// the install existed. Registered unconditionally and by header rather
+		// than by library: the absent -> present transition is the one that must
+		// invalidate, and these two headers are precisely what Gen/ cannot find
+		// when the staging has not been run.
+		ExternalDependencies.Add(Path.Combine(Root, "sdk", "protospec", "profile.h"));
+		ExternalDependencies.Add(Path.Combine(Root, "generated", "types.h"));
 		if (!Directory.Exists(IncludePath) || !Directory.Exists(LibPath))
 		{
 			Console.WriteLine(
