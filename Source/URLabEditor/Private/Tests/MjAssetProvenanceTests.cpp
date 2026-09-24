@@ -610,6 +610,60 @@ bool FMjExternalNotRebasedTest::RunTest(const FString& Parameters)
 }
 
 // ============================================================================
+// URLab.Assets.ASpecAtTheFilesystemRootIsNotRebased
+//
+// The marker can start the path: `/Saved/<n>` names a directory whose root is
+// the filesystem root, which is always present and must therefore refuse like
+// any other root that is still there. Treating "no characters before the
+// marker" as "no root to check" would make this the single recorded directory
+// that rebases with no provenance behind it at all.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjFilesystemRootNotRebasedTest, "URLab.Assets.ASpecAtTheFilesystemRootIsNotRebased",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMjFilesystemRootNotRebasedTest::RunTest(const FString& Parameters)
+{
+	using namespace MjAssetProvenanceTests;
+
+	const FString Name = UniqueName();
+
+	// Where re-rooting `/Saved/<n>` would land, holding a same-named file.
+	FScratchTree Decoyed(ScratchPath(Name));
+	const FString Decoy = Decoyed.Root / TEXT("part.obj");
+	if (!TestTrue(TEXT("the decoy mesh was written"), WriteMesh(Decoy)))
+	{
+		return false;
+	}
+
+	// Recorded at the filesystem root. The directory itself is not there --
+	// what is there, and what has to be noticed, is the root above it.
+	const FString SourceDir = FString(TEXT("/Saved/")) + Name;
+	TestFalse(TEXT("the recorded directory really is absent"), FPaths::DirectoryExists(SourceDir));
+
+	FScratchDoc Doc;
+	if (!Parse(*this, Doc, MeshModel(TEXT("part.obj")), SourceDir / TEXT("prov_ue.xml")))
+	{
+		return false;
+	}
+
+	UMjMesh* Mesh = Doc.Actor->FindComponentByClass<UMjMesh>();
+	if (!TestNotNull(TEXT("the mesh element"), Mesh))
+	{
+		return false;
+	}
+
+	TestNotEqual(TEXT("this project's same-named file is not substituted"),
+		MjResolveAssetPath(*Mesh, FString(), Mesh->File.Get(FString())),
+		FPaths::ConvertRelativePathToFull(Decoy));
+
+	FRecordingSink Sink;
+	FMjAssetSink Pass(Sink);
+	Pass.Collect(Doc.Ref());
+	TestEqual(TEXT("it is reported missing instead"), Sink.Missing.Num(), 1);
+	return true;
+}
+
+// ============================================================================
 // URLab.Assets.AMissingFileStillNamesWhatItLookedFor
 //
 // A file that is nowhere must still be reported missing, and the path it

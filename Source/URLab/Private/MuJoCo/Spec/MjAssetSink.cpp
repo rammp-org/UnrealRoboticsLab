@@ -85,7 +85,17 @@ bool ResolveUnderThisProject(const FString& Directory, const FString& File, FStr
 		// or a second project next door must not be answered with our own copy
 		// of a same-named file. Only a root that is genuinely absent is treated
 		// as "somewhere this content used to live".
-		if (Tail > 1 && FPaths::DirectoryExists(Normalized.Left(Tail - 1)))
+		FString RecordedRoot = Normalized.Left(Tail - 1);
+		if (RecordedRoot.IsEmpty() || RecordedRoot.EndsWith(TEXT(":")))
+		{
+			// The marker started the path, so the root it sat under is the
+			// filesystem root itself -- which is always there, and so always
+			// refuses below. Skipping the check for this case instead would
+			// make `/Saved/x` the one recorded directory that rebases without
+			// any provenance at all.
+			RecordedRoot += TEXT("/");
+		}
+		if (FPaths::DirectoryExists(RecordedRoot))
 		{
 			continue;
 		}
