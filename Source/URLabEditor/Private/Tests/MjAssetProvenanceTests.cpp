@@ -545,6 +545,71 @@ bool FMjDirectlyInProjectFolderTest::RunTest(const FString& Parameters)
 }
 
 // ============================================================================
+// URLab.Assets.AnExternalDirectoryStillPresentIsNotRebased
+//
+// A project folder's NAME appearing in a path does not make that path a
+// project. `/tmp/Saved/Downloads` contains one, and re-rooting its tail would
+// answer with this project's `Saved/Downloads` -- silently handing back
+// unrelated geometry under a same-shaped tail. What separates the two is
+// whether the directory above the tail is still on this machine: a project
+// that moved leaves nothing there, while a live external folder is right where
+// it always was.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjExternalNotRebasedTest, "URLab.Assets.AnExternalDirectoryStillPresentIsNotRebased",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMjExternalNotRebasedTest::RunTest(const FString& Parameters)
+{
+	using namespace MjAssetProvenanceTests;
+
+	const FString Name = UniqueName();
+	FString ProjectRoot = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+
+	// An external tree that exists and is NOT a project, carrying a folder
+	// named like one. Nothing is written into it: the file it names is missing,
+	// which is what sends the resolution looking for somewhere else to try.
+	FScratchTree External(FPaths::ConvertRelativePathToFull(ProjectRoot / TEXT("..")) / (TEXT("MjExternal_") + Name));
+	const FString SourceDir = External.Root / TEXT("Saved") / Name;
+	IFileManager::Get().MakeDirectory(*SourceDir, /*Tree=*/true);
+
+	// Where re-rooting that tail would land, holding a same-named file.
+	FScratchTree Decoyed(ScratchPath(Name));
+	const FString Decoy = Decoyed.Root / TEXT("part.obj");
+	if (!TestTrue(TEXT("the decoy mesh was written"), WriteMesh(Decoy)))
+	{
+		return false;
+	}
+	if (!TestTrue(TEXT("the external directory really is still there"),
+			FPaths::DirectoryExists(External.Root)))
+	{
+		return false;
+	}
+
+	FScratchDoc Doc;
+	if (!Parse(*this, Doc, MeshModel(TEXT("part.obj")), SourceDir / TEXT("prov_ue.xml")))
+	{
+		return false;
+	}
+
+	UMjMesh* Mesh = Doc.Actor->FindComponentByClass<UMjMesh>();
+	if (!TestNotNull(TEXT("the mesh element"), Mesh))
+	{
+		return false;
+	}
+
+	TestNotEqual(TEXT("this project's same-named file is not substituted"),
+		MjResolveAssetPath(*Mesh, FString(), Mesh->File.Get(FString())),
+		FPaths::ConvertRelativePathToFull(Decoy));
+
+	FRecordingSink Sink;
+	FMjAssetSink Pass(Sink);
+	Pass.Collect(Doc.Ref());
+	TestEqual(TEXT("it is reported missing instead"), Sink.Missing.Num(), 1);
+	TestEqual(TEXT("and nothing was collected for it"), Sink.Found.Num(), 0);
+	return true;
+}
+
+// ============================================================================
 // URLab.Assets.AMissingFileStillNamesWhatItLookedFor
 //
 // A file that is nowhere must still be reported missing, and the path it

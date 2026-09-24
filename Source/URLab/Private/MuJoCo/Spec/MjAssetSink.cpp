@@ -10,6 +10,7 @@
 
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Utils/URLabLogging.h"
 #include "MuJoCo/Spec/MjSpecRef.h"
 #include "MuJoCo/Spec/MjNodeComponent.h"
 
@@ -77,6 +78,18 @@ bool ResolveUnderThisProject(const FString& Directory, const FString& File, FStr
 
 	for (const int32 Tail : Tails)
 	{
+		// The directory above the tail is where that project's root would have
+		// been. If it is sitting right there on this machine then the recorded
+		// path was never a project that went missing -- it is a live directory
+		// that simply does not hold this file, and an external `/tmp/Saved/...`
+		// or a second project next door must not be answered with our own copy
+		// of a same-named file. Only a root that is genuinely absent is treated
+		// as "somewhere this content used to live".
+		if (Tail > 1 && FPaths::DirectoryExists(Normalized.Left(Tail - 1)))
+		{
+			continue;
+		}
+
 		const FString Rebased = FPaths::Combine(ProjectRoot, Normalized.RightChop(Tail));
 		const FString Candidate = FPaths::ConvertRelativePathToFull(FPaths::Combine(Rebased, File));
 
@@ -90,6 +103,15 @@ bool ResolveUnderThisProject(const FString& Directory, const FString& File, FStr
 		{
 			continue;
 		}
+		// Said out loud. This is a recovery, not a normal read: it answers with
+		// a file the document did not name, and the one way it can still be
+		// wrong is a same-named file under a same-shaped tail. Nobody should
+		// have to guess that it happened.
+		UE_LOG(LogURLab, Warning,
+			TEXT("Asset '%s' was not at '%s'; using '%s' from this project instead (the recorded ")
+				TEXT("project directory is not on this machine)."),
+			*File, *FPaths::ConvertRelativePathToFull(FPaths::Combine(Directory, File)), *Candidate);
+
 		OutPath = Candidate;
 		OutBase = Rebased;
 		return true;
@@ -301,6 +323,13 @@ FString MjResolveAssetPath(const UMjNodeComponent& Element, const FString& Asset
 	}
 
 	const FString Resolved = FPaths::ConvertRelativePathToFull(FPaths::Combine(Base, File));
+
+	// A short circuit, not the guarantee. What keeps a resolvable path from
+	// being redirected is the check below that the recorded project root is
+	// absent: a file sitting at `Base/File` means `Base` is on this machine,
+	// which means that root is too, so the rebase is refused whether or not
+	// this returns first. Deleting these four lines changes no answer -- only
+	// how much work is done to reach it.
 	if (FPaths::FileExists(Resolved))
 	{
 		return Resolved;
