@@ -35,9 +35,25 @@ namespace
  * out with `..` -- which is what an import beside the project writes --
  * collapses those segments away and leaves nothing to key on.
  *
- * Only a path that has already failed to resolve reaches this, and only a
- * candidate that exists is returned, so a resolution that works is never
- * redirected and a genuinely missing file is still reported missing.
+ * Three things have to hold before a candidate is taken, because a marker is
+ * only a folder NAME and naming proves nothing:
+ *
+ *   - the directory above the tail -- where that project's root would have
+ *     been -- must be absent, so a live `/tmp/Saved/...` or a second project
+ *     next door is never answered with our own copy of a same-named file;
+ *   - the candidate must land under this project, so a `file` full of `..`
+ *     cannot climb back out to the machine-specific place it came from;
+ *   - the file must actually be there.
+ *
+ * Where more than one tail still qualifies -- an old project directory itself
+ * called `Saved` puts a marker above the real boundary, and both roots are
+ * equally gone -- the deepest wins, since the tail keeping the most structure
+ * is what reconstructs a plugin nested under `Content` correctly, and that is
+ * a great deal commoner than a project named after a project folder. It is
+ * logged when it happens, so a choice that was not forced is visible.
+ *
+ * A resolution that already works never reaches any of this, and a genuinely
+ * missing file is still reported missing.
  */
 bool ResolveUnderThisProject(const FString& Directory, const FString& File, FString& OutPath, FString& OutBase)
 {
@@ -76,15 +92,17 @@ bool ResolveUnderThisProject(const FString& Directory, const FString& File, FStr
 	}
 	Tails.Sort();
 
+	// Gathered rather than returned on sight. More than one tail can name an
+	// existing file -- an old project directory itself called `Saved` puts a
+	// marker above the real boundary, and both roots are equally gone, so no
+	// amount of checking the roots separates them. The deepest still wins,
+	// because the tail keeping the most structure is the one that reconstructs
+	// a nested plugin correctly and that case is far commoner than a project
+	// named after a project folder. But a second viable answer means the choice
+	// was not forced, and that is said out loud rather than resolved quietly.
+	TArray<TPair<FString, FString>> Viable;
 	for (const int32 Tail : Tails)
 	{
-		// The directory above the tail is where that project's root would have
-		// been. If it is sitting right there on this machine then the recorded
-		// path was never a project that went missing -- it is a live directory
-		// that simply does not hold this file, and an external `/tmp/Saved/...`
-		// or a second project next door must not be answered with our own copy
-		// of a same-named file. Only a root that is genuinely absent is treated
-		// as "somewhere this content used to live".
 		FString RecordedRoot = Normalized.Left(Tail - 1);
 		if (RecordedRoot.IsEmpty() || RecordedRoot.EndsWith(TEXT(":")))
 		{
@@ -113,20 +131,42 @@ bool ResolveUnderThisProject(const FString& Directory, const FString& File, FStr
 		{
 			continue;
 		}
-		// Said out loud. This is a recovery, not a normal read: it answers with
-		// a file the document did not name, and the one way it can still be
-		// wrong is a same-named file under a same-shaped tail. Nobody should
-		// have to guess that it happened.
-		UE_LOG(LogURLab, Warning,
-			TEXT("Asset '%s' was not at '%s'; using '%s' from this project instead (the recorded ")
-				TEXT("project directory is not on this machine)."),
-			*File, *FPaths::ConvertRelativePathToFull(FPaths::Combine(Directory, File)), *Candidate);
-
-		OutPath = Candidate;
-		OutBase = Rebased;
-		return true;
+		if (!Viable.ContainsByPredicate([&Candidate](const TPair<FString, FString>& Seen) { return Seen.Key == Candidate; }))
+		{
+			Viable.Emplace(Candidate, Rebased);
+		}
 	}
-	return false;
+
+	if (Viable.Num() == 0)
+	{
+		return false;
+	}
+
+	if (Viable.Num() > 1)
+	{
+		FString Alternatives;
+		for (int32 Index = 1; Index < Viable.Num(); ++Index)
+		{
+			Alternatives += FString::Printf(TEXT("%s'%s'"), Index > 1 ? TEXT(", ") : TEXT(""), *Viable[Index].Key);
+		}
+		UE_LOG(LogURLab, Warning,
+			TEXT("Asset '%s' could be recovered from more than one place under this project; taking the deepest ")
+				TEXT("match '%s' over %s. Check that it is the one you meant."),
+			*File, *Viable[0].Key, *Alternatives);
+	}
+
+	// Said out loud. This is a recovery, not a normal read: it answers with
+	// a file the document did not name, and the one way it can still be
+	// wrong is a same-named file under a same-shaped tail. Nobody should
+	// have to guess that it happened.
+	UE_LOG(LogURLab, Warning,
+		TEXT("Asset '%s' was not at '%s'; using '%s' from this project instead (the recorded ")
+			TEXT("project directory is not on this machine)."),
+		*File, *FPaths::ConvertRelativePathToFull(FPaths::Combine(Directory, File)), *Viable[0].Key);
+
+	OutPath = Viable[0].Key;
+	OutBase = Viable[0].Value;
+	return true;
 }
 
 /**

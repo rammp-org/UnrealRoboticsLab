@@ -380,11 +380,16 @@ bool FMjDeepestFolderWinsTest::RunTest(const FString& Parameters)
 	// `Intermediate/` comes after `Saved/` in the marker list but FIRST in this
 	// path, so declaration order and path order disagree -- which is the whole
 	// point of the fixture.
-	FScratchTree Deep(FPaths::ConvertRelativePathToFull(
-		FPaths::ProjectIntermediateDir() / Name / TEXT("Saved") / Name));
+	// Owned at the OUTER directory, not the leaf: a scratch tree removes the
+	// path it was given, so rooting it deeper leaves the directories above it
+	// behind on every run.
+	FScratchTree Deep(FPaths::ConvertRelativePathToFull(FPaths::ProjectIntermediateDir() / Name));
 	FScratchTree Shallow(ScratchPath(Name));
 
-	const FString Right = Deep.Root / TEXT("part.obj");
+	const FString DeepDir = Deep.Root / TEXT("Saved") / Name;
+	IFileManager::Get().MakeDirectory(*DeepDir, /*Tree=*/true);
+
+	const FString Right = DeepDir / TEXT("part.obj");
 	const FString Wrong = Shallow.Root / TEXT("part.obj");
 	if (!TestTrue(TEXT("the deep mesh was written"), WriteMesh(Right))
 		|| !TestTrue(TEXT("the shallow mesh was written"), WriteMesh(Wrong)))
