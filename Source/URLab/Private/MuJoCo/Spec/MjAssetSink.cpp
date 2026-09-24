@@ -38,7 +38,7 @@ namespace
  * candidate that exists is returned, so a resolution that works is never
  * redirected and a genuinely missing file is still reported missing.
  */
-bool ResolveUnderThisProject(const FString& Directory, const FString& File, FString& OutPath)
+bool ResolveUnderThisProject(const FString& Directory, const FString& File, FString& OutPath, FString& OutBase)
 {
 	static const TCHAR* const ProjectFolders[] = {TEXT("/Saved/"), TEXT("/Content/"), TEXT("/Plugins/"), TEXT("/Intermediate/")};
 
@@ -91,6 +91,7 @@ bool ResolveUnderThisProject(const FString& Directory, const FString& File, FStr
 			continue;
 		}
 		OutPath = Candidate;
+		OutBase = Rebased;
 		return true;
 	}
 	return false;
@@ -275,11 +276,21 @@ FString MjAssetElementName(const UMjNodeComponent& Element)
 	return FString();
 }
 
-FString MjResolveAssetPath(const UMjNodeComponent& Element, const FString& AssetDir, const FString& File)
+FString MjResolveAssetPath(const UMjNodeComponent& Element, const FString& AssetDir, const FString& File,
+	FString* OutBaseDirectory)
 {
 	if (File.IsEmpty())
 	{
 		return FString();
+	}
+
+	// Reported before anything can fail, so a caller always learns which
+	// directory the answer belongs to even when the answer is the one nobody
+	// could open.
+	const FString Base = AssetBaseDirectory(Element, AssetDir);
+	if (OutBaseDirectory != nullptr)
+	{
+		*OutBaseDirectory = Base;
 	}
 	// MuJoCo takes an absolute `file` as it stands; only a relative one goes
 	// through the directories. A spec whose asset was exported back out of
@@ -289,7 +300,6 @@ FString MjResolveAssetPath(const UMjNodeComponent& Element, const FString& Asset
 		return File;
 	}
 
-	const FString Base = AssetBaseDirectory(Element, AssetDir);
 	const FString Resolved = FPaths::ConvertRelativePathToFull(FPaths::Combine(Base, File));
 	if (FPaths::FileExists(Resolved))
 	{
@@ -300,8 +310,19 @@ FString MjResolveAssetPath(const UMjNodeComponent& Element, const FString& Asset
 	// has since moved, which is what opening the content on a second machine
 	// looks like from here.
 	FString Rebased;
-	if (ResolveUnderThisProject(Base, File, Rebased))
+	FString RebasedBase;
+	if (ResolveUnderThisProject(Base, File, Rebased, RebasedBase))
 	{
+		// The base goes with it. Anything that writes a file back for this
+		// element -- MjSyncAssetFiles dumping a mesh whose asset and file have
+		// parted company -- places it relative to this directory, and the old
+		// one names a checkout that is not on this machine: the write lands in
+		// a stray tree, or fails outright, and the next compile still finds
+		// nothing.
+		if (OutBaseDirectory != nullptr)
+		{
+			*OutBaseDirectory = RebasedBase;
+		}
 		return Rebased;
 	}
 
@@ -363,7 +384,8 @@ void FMjAssetSink::Collect(const FSpecRef& Spec)
 			if (!File.IsEmpty())
 			{
 				Request.File = File;
-				Request.ResolvedPath = MjResolveAssetPath(*Asset.Node, bTexture ? TextureDir : MeshDir, File);
+				Request.ResolvedPath =
+					MjResolveAssetPath(*Asset.Node, bTexture ? TextureDir : MeshDir, File, &Request.BaseDirectory);
 				// Under a prefix the caller points the reference at whatever this
 				// emits, so a basename carries it. Without one nothing rewrites
 				// anything and the reference still says what the document said,

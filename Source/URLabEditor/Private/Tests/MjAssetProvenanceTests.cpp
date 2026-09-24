@@ -27,6 +27,7 @@
 
 #if URLAB_MJ_GEN && WITH_EDITOR
 
+#include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
@@ -36,6 +37,7 @@
 #include "Misc/Paths.h"
 
 #include "MuJoCo/Elements/MjMesh.h"
+#include "MuJoCo/Spec/MjAssetFiles.h"
 #include "MuJoCo/Spec/MjAssetSink.h"
 #include "MuJoCo/Spec/MjSpecBuild.h"
 #include "MuJoCo/Spec/MjSpecRef.h"
@@ -238,17 +240,20 @@ bool FMjResolvableNotRedirectedTest::RunTest(const FString& Parameters)
 {
 	using namespace MjAssetProvenanceTests;
 
-	// The decoy goes exactly where a re-root of the recorded directory lands,
-	// which is the only placement that can catch the repair firing when it
-	// should not. So the model sits in a directory that both EXISTS and has a
-	// project folder inside it: `<Saved>/URLab/TestProvenance/<n>/Saved/<n>`,
-	// whose last `Saved/` tail re-roots to `<Saved>/<n>` -- the decoy.
+	// The recorded directory has to be one that EXISTS and whose re-root lands
+	// somewhere else, or the fixture cannot tell the two apart. So it sits
+	// beside the project rather than inside it: nothing under `ProjectDir`
+	// would do, because the longest tail then reproduces that same directory
+	// and the decoy is never a candidate.
 	const FString Name = UniqueName();
-	FScratchTree Outer(ScratchPath(FString(TEXT("URLab/TestProvenance/")) + Name));
-	FScratchTree Decoyed(ScratchPath(Name));
+	FString ProjectRoot = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
 
-	const FString BesideDir = Outer.Root / TEXT("Saved") / Name;
+	FScratchTree Other(FPaths::ConvertRelativePathToFull(ProjectRoot / TEXT("..")) / (TEXT("MjOtherCheckout_") + Name));
+	const FString BesideDir = Other.Root / TEXT("Saved") / Name;
 	IFileManager::Get().MakeDirectory(*BesideDir, /*Tree=*/true);
+
+	// Its only marker is that `Saved/`, so the re-root target is exactly here.
+	FScratchTree Decoyed(ScratchPath(Name));
 
 	const FString Real = BesideDir / TEXT("part.obj");
 	const FString Decoy = Decoyed.Root / TEXT("part.obj");
@@ -257,10 +262,10 @@ bool FMjResolvableNotRedirectedTest::RunTest(const FString& Parameters)
 	{
 		return false;
 	}
-
-	// The fixture is only meaningful if the decoy really is what a re-root
-	// would find, so assert the geometry of the test itself.
-	if (!TestNotEqual(TEXT("the decoy is somewhere else than the real file"), Real, Decoy))
+	if (!TestFalse(TEXT("the recorded directory is outside this project"),
+			FPaths::ConvertRelativePathToFull(Real).StartsWith(ProjectRoot))
+		|| !TestTrue(TEXT("and the decoy is inside it"),
+			FPaths::ConvertRelativePathToFull(Decoy).StartsWith(ProjectRoot)))
 	{
 		return false;
 	}
@@ -282,53 +287,6 @@ bool FMjResolvableNotRedirectedTest::RunTest(const FString& Parameters)
 		FPaths::ConvertRelativePathToFull(Real));
 	TestNotEqual(TEXT("and is not the copy a re-root would have found"), Resolved,
 		FPaths::ConvertRelativePathToFull(Decoy));
-	return true;
-}
-
-// ============================================================================
-// URLab.Assets.ASpecDirectlyInAProjectFolderResolves
-//
-// The tail can be the whole directory: a spec read from `<Project>/Saved`
-// itself, rather than from somewhere below it. The recorded directory then ends
-// at the project folder with nothing after it, which is exactly the spelling a
-// normalised path loses its trailing separator on -- and a marker that insists
-// on one stops matching.
-// ============================================================================
-IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjDirectlyInProjectFolderTest, "URLab.Assets.ASpecDirectlyInAProjectFolderResolves",
-	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
-
-bool FMjDirectlyInProjectFolderTest::RunTest(const FString& Parameters)
-{
-	using namespace MjAssetProvenanceTests;
-
-	const FString Name = UniqueName();
-	FScratchTree Tree(ScratchPath(Name));
-	const FString MeshPath = Tree.Root / TEXT("part.obj");
-	if (!TestTrue(TEXT("the scratch mesh was written"), WriteMesh(MeshPath)))
-	{
-		return false;
-	}
-
-	// Recorded as read from `<AbsentCheckout>/Saved` itself: the directory ends
-	// at the project folder, so the tail it contributes is just `Saved/`.
-	const FString AbsentRoot = FString(TEXT("/MjNoSuchCheckout_")) + UniqueName();
-	const FString SourcePath = AbsentRoot / TEXT("Saved/prov_ue.xml");
-
-	FScratchDoc Doc;
-	if (!Parse(*this, Doc, MeshModel(Name / TEXT("part.obj")), SourcePath))
-	{
-		return false;
-	}
-
-	UMjMesh* Mesh = Doc.Actor->FindComponentByClass<UMjMesh>();
-	if (!TestNotNull(TEXT("the mesh element"), Mesh))
-	{
-		return false;
-	}
-
-	TestEqual(TEXT("a spec read from the project folder itself still resolves"),
-		MjResolveAssetPath(*Mesh, FString(), Mesh->File.Get(FString())),
-		FPaths::ConvertRelativePathToFull(MeshPath));
 	return true;
 }
 
@@ -454,6 +412,135 @@ bool FMjDeepestFolderWinsTest::RunTest(const FString& Parameters)
 		FPaths::ConvertRelativePathToFull(Right));
 	TestNotEqual(TEXT("not the shallower reading"), Resolved,
 		FPaths::ConvertRelativePathToFull(Wrong));
+	return true;
+}
+
+// ============================================================================
+// URLab.Assets.AMovedProjectDumpsBesideWhatItFound
+//
+// Resolving is only half of it. When an element's asset and its file have
+// parted company, MjSyncAssetFiles writes the asset back out relative to the
+// element's BASE directory -- and on a moved project that base names a
+// checkout this machine does not have, so the dump lands in a stray tree or
+// fails outright and the compile still finds nothing. Recovering the path has
+// to carry the base that went with it.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjMovedProjectDumpTest, "URLab.Assets.AMovedProjectDumpsBesideWhatItFound",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMjMovedProjectDumpTest::RunTest(const FString& Parameters)
+{
+	using namespace MjAssetProvenanceTests;
+
+	const FString Name = UniqueName();
+	FString ProjectRoot = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+
+	// The content where this project has it, and the import directory the
+	// re-root will reconstruct -- owned here so the dump is cleaned up with it.
+	FScratchTree Content(ScratchPath(FString(TEXT("URLab/TestProvenance/")) + Name));
+	FScratchTree Import(ScratchPath(FString(TEXT("URLab/ImportPrep/")) + Name));
+	const FString MeshPath = Content.Root / TEXT("part.obj");
+	if (!TestTrue(TEXT("the scratch mesh was written"), WriteMesh(MeshPath)))
+	{
+		return false;
+	}
+
+	FString Tail = Content.Root;
+	FPaths::MakePathRelativeTo(Tail, *ProjectRoot);
+	// Four, counted off `<root>/Saved/URLab/ImportPrep/<n>`: the reference has
+	// to climb back to the checkout root before descending into the content.
+	const FString File = FString(TEXT("../../../../")) / Tail / TEXT("part.obj");
+
+	const FString AbsentRoot = FString(TEXT("/MjNoSuchCheckout_")) + UniqueName();
+	const FString SourcePath = AbsentRoot / TEXT("Saved/URLab/ImportPrep") / Name / TEXT("prov_ue.xml");
+
+	FScratchDoc Doc;
+	if (!Parse(*this, Doc, MeshModel(File), SourcePath))
+	{
+		return false;
+	}
+
+	UMjMesh* Mesh = Doc.Actor->FindComponentByClass<UMjMesh>();
+	if (!TestNotNull(TEXT("the mesh element"), Mesh))
+	{
+		return false;
+	}
+	if (!TestEqual(TEXT("the reference resolves by re-rooting first"),
+			MjResolveAssetPath(*Mesh, FString(), Mesh->File.Get(FString())),
+			FPaths::ConvertRelativePathToFull(MeshPath)))
+	{
+		return false;
+	}
+
+	// Now part the asset and the file company, which is what makes the export
+	// pass write anything at all.
+	UStaticMesh* Cube = LoadObject<UStaticMesh>(nullptr, TEXT("/Engine/BasicShapes/Cube.Cube"));
+	if (!TestNotNull(TEXT("the engine cube"), Cube))
+	{
+		return false;
+	}
+	Mesh->MeshAsset = Cube;
+	Mesh->FileAsset = FSoftObjectPath();
+	if (!TestTrue(TEXT("the element reads as stale"), Mesh->IsFileStale()))
+	{
+		return false;
+	}
+
+	MjSyncAssetFiles(Doc.Ref());
+
+	const FString Rewritten = Mesh->File.Get(FString());
+	TestNotEqual(TEXT("the reference was rewritten by the dump"), Rewritten, File);
+
+	const FString Dumped = MjResolveAssetPath(*Mesh, FString(), Rewritten);
+	TestTrue(TEXT("the dump landed under this project"), Dumped.StartsWith(ProjectRoot));
+	TestTrue(TEXT("and the compiler can actually open it"), FPaths::FileExists(Dumped));
+	return true;
+}
+
+// ============================================================================
+// URLab.Assets.ASpecDirectlyInAProjectFolderResolves
+//
+// The tail can be the whole directory: a spec read from `<Project>/Saved`
+// itself, rather than from somewhere below it. The recorded directory then ends
+// at the project folder with nothing after it, which is exactly the spelling a
+// normalised path loses its trailing separator on -- and a marker that insists
+// on one stops matching.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjDirectlyInProjectFolderTest, "URLab.Assets.ASpecDirectlyInAProjectFolderResolves",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMjDirectlyInProjectFolderTest::RunTest(const FString& Parameters)
+{
+	using namespace MjAssetProvenanceTests;
+
+	const FString Name = UniqueName();
+	FScratchTree Tree(ScratchPath(Name));
+	const FString MeshPath = Tree.Root / TEXT("part.obj");
+	if (!TestTrue(TEXT("the scratch mesh was written"), WriteMesh(MeshPath)))
+	{
+		return false;
+	}
+
+	// Recorded as read from `<AbsentCheckout>/Saved` itself: the directory ends
+	// at the project folder, so the tail it contributes is just `Saved/`.
+	const FString AbsentRoot = FString(TEXT("/MjNoSuchCheckout_")) + UniqueName();
+	const FString SourcePath = AbsentRoot / TEXT("Saved/prov_ue.xml");
+
+	FScratchDoc Doc;
+	if (!Parse(*this, Doc, MeshModel(Name / TEXT("part.obj")), SourcePath))
+	{
+		return false;
+	}
+
+	UMjMesh* Mesh = Doc.Actor->FindComponentByClass<UMjMesh>();
+	if (!TestNotNull(TEXT("the mesh element"), Mesh))
+	{
+		return false;
+	}
+
+	TestEqual(TEXT("a spec read from the project folder itself still resolves"),
+		MjResolveAssetPath(*Mesh, FString(), Mesh->File.Get(FString())),
+		FPaths::ConvertRelativePathToFull(MeshPath));
 	return true;
 }
 
