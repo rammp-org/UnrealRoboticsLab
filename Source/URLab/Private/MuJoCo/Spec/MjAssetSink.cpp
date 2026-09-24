@@ -16,14 +16,6 @@
 namespace
 {
 /**
- * The directory an asset path resolves against.
- *
- * MJCF resolves an asset path relative to the model file, then through the
- * compiler's meshdir / texturedir. The element records the file it came from, so
- * an included sub-spec's assets resolve beside the include rather than
- * beside the root -- which is the whole reason provenance is per element.
- */
-/**
  * `File` resolved against `Directory` re-rooted onto THIS project, when that is
  * where the file turns out to be.
  *
@@ -50,8 +42,15 @@ bool ResolveUnderThisProject(const FString& Directory, const FString& File, FStr
 {
 	static const TCHAR* const ProjectFolders[] = {TEXT("/Saved/"), TEXT("/Content/"), TEXT("/Plugins/"), TEXT("/Intermediate/")};
 
+	// Normalized, then given the trailing separator back. Each marker carries
+	// one so that `Content` cannot match inside `ContentAddressable`, and
+	// NormalizeDirectoryName strips exactly that character -- which left a spec
+	// sitting DIRECTLY in `<Project>/Saved` or `<Project>/Content` matching
+	// nothing at all, the one case where the tail is the whole directory.
 	FString Normalized = Directory;
 	FPaths::NormalizeDirectoryName(Normalized);
+	Normalized.AppendChar(TEXT('/'));
+
 	for (const TCHAR* const Folder : ProjectFolders)
 	{
 		// From the end: the project's own location may well contain one of
@@ -72,6 +71,14 @@ bool ResolveUnderThisProject(const FString& Directory, const FString& File, FStr
 	return false;
 }
 
+/**
+ * The directory an asset path resolves against.
+ *
+ * MJCF resolves an asset path relative to the model file, then through the
+ * compiler's meshdir / texturedir. The element records the file it came from, so
+ * an included sub-spec's assets resolve beside the include rather than
+ * beside the root -- which is the whole reason provenance is per element.
+ */
 FString AssetBaseDirectory(const UMjNodeComponent& Element, const FString& AssetDir)
 {
 	const FString SourceDir = Element.SourceFile.IsEmpty() ? FString() : FPaths::GetPath(Element.SourceFile);
