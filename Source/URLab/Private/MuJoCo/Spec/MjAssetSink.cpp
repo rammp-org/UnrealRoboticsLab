@@ -51,22 +51,47 @@ bool ResolveUnderThisProject(const FString& Directory, const FString& File, FStr
 	FPaths::NormalizeDirectoryName(Normalized);
 	Normalized.AppendChar(TEXT('/'));
 
+	FString ProjectRoot = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	if (!ProjectRoot.EndsWith(TEXT("/")))
+	{
+		ProjectRoot.AppendChar(TEXT('/'));
+	}
+
+	// Every point where the recorded directory crosses into a project folder,
+	// rather than whichever marker comes first in the list above: a directory
+	// like `<old>/Plugins/MyPlugin/Content/Models` sits under two of them, and
+	// the tail keeping the most structure is the one that names the same place
+	// here. Tried longest first, so the plugin-relative reading wins over the
+	// bare `Content/` one; a marker that was really part of the old machine's
+	// path ABOVE its project just names a candidate that is not there.
+	TArray<int32> Tails;
 	for (const TCHAR* const Folder : ProjectFolders)
 	{
-		// From the end: the project's own location may well contain one of
-		// these words, and it is the last one that starts the tail.
-		const int32 At = Normalized.Find(Folder, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
-		if (At == INDEX_NONE)
+		int32 At = INDEX_NONE;
+		while ((At = Normalized.Find(Folder, ESearchCase::IgnoreCase, ESearchDir::FromStart, At + 1)) != INDEX_NONE)
+		{
+			Tails.AddUnique(At + 1);
+		}
+	}
+	Tails.Sort();
+
+	for (const int32 Tail : Tails)
+	{
+		const FString Rebased = FPaths::Combine(ProjectRoot, Normalized.RightChop(Tail));
+		const FString Candidate = FPaths::ConvertRelativePathToFull(FPaths::Combine(Rebased, File));
+
+		// It has to land under THIS project, or it is not what this is for. A
+		// `file` carrying enough `..` climbs straight back out of whatever it
+		// is rebased onto -- and a model that referenced something outside any
+		// project to begin with would then be "rescued" to the very
+		// machine-specific location that makes it unportable, which is the
+		// opposite of the point.
+		if (!Candidate.StartsWith(ProjectRoot) || !FPaths::FileExists(Candidate))
 		{
 			continue;
 		}
-		const FString Rebased = FPaths::Combine(FPaths::ProjectDir(), Normalized.RightChop(At + 1));
-		const FString Candidate = FPaths::ConvertRelativePathToFull(FPaths::Combine(Rebased, File));
-		if (FPaths::FileExists(Candidate))
-		{
-			OutPath = Candidate;
-			return true;
-		}
+		OutPath = Candidate;
+		return true;
 	}
 	return false;
 }

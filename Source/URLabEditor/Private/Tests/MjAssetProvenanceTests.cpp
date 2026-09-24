@@ -30,6 +30,7 @@
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformProcess.h"
 #include "Misc/FileHelper.h"
 #include "Misc/Guid.h"
 #include "Misc/Paths.h"
@@ -328,6 +329,131 @@ bool FMjDirectlyInProjectFolderTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("a spec read from the project folder itself still resolves"),
 		MjResolveAssetPath(*Mesh, FString(), Mesh->File.Get(FString())),
 		FPaths::ConvertRelativePathToFull(MeshPath));
+	return true;
+}
+
+// ============================================================================
+// URLab.Assets.ARebasedPathMayNotEscapeTheProject
+//
+// The reference decides where the rebased base lands, and a reference with
+// enough `..` in it climbs straight back out. A model that pointed outside any
+// project to begin with -- an import from a downloads folder, which is exactly
+// how this failure reaches us -- would otherwise be "rescued" onto the same
+// machine-specific location that makes it unportable, and report success.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjNoEscapeTest, "URLab.Assets.ARebasedPathMayNotEscapeTheProject",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMjNoEscapeTest::RunTest(const FString& Parameters)
+{
+	using namespace MjAssetProvenanceTests;
+
+	const FString Name = UniqueName();
+	FString ProjectRoot = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+
+	// A real file beside the project rather than inside it -- the shape of an
+	// import that read its meshes out of a downloads folder.
+	FScratchTree Outside(FPaths::ConvertRelativePathToFull(ProjectRoot / TEXT("..")) / (TEXT("MjOutsideProject_") + Name));
+	const FString Escaped = Outside.Root / TEXT("part.obj");
+	if (!TestTrue(TEXT("the outside mesh was written"), WriteMesh(Escaped)))
+	{
+		return false;
+	}
+	if (!TestFalse(TEXT("the fixture's file really is outside the project"),
+			FPaths::ConvertRelativePathToFull(Escaped).StartsWith(ProjectRoot)))
+	{
+		return false;
+	}
+
+	// The reference as counted from `<Project>/Saved/<n>` -- so rebasing lands
+	// on it exactly. The recorded root is deliberately SHALLOWER than this
+	// project, which is what makes the same climb fall somewhere else there;
+	// a climb that reaches the filesystem root would land identically from any
+	// base of equal depth and the two readings could never differ.
+	FString Climb = FPaths::ConvertRelativePathToFull(Escaped);
+	FPaths::MakePathRelativeTo(Climb, *(ProjectRoot / TEXT("Saved") / Name / TEXT("x")));
+
+	const FString AbsentRoot = FString(TEXT("/MjNoSuchCheckout_")) + UniqueName();
+	FScratchDoc Doc;
+	if (!Parse(*this, Doc, MeshModel(Climb), AbsentRoot / TEXT("Saved") / Name / TEXT("prov_ue.xml")))
+	{
+		return false;
+	}
+
+	UMjMesh* Mesh = Doc.Actor->FindComponentByClass<UMjMesh>();
+	if (!TestNotNull(TEXT("the mesh element"), Mesh))
+	{
+		return false;
+	}
+
+	TestNotEqual(TEXT("a rebase that leaves the project is refused"),
+		MjResolveAssetPath(*Mesh, FString(), Mesh->File.Get(FString())),
+		FPaths::ConvertRelativePathToFull(Escaped));
+
+	// And it stays missing, which is the claim that matters: content outside
+	// any project is a data problem to report, not something to be found by
+	// reaching back onto this machine.
+	FRecordingSink Sink;
+	FMjAssetSink Pass(Sink);
+	Pass.Collect(Doc.Ref());
+	TestEqual(TEXT("the mesh is still reported missing"), Sink.Missing.Num(), 1);
+	TestEqual(TEXT("and nothing was collected for it"), Sink.Found.Num(), 0);
+	return true;
+}
+
+// ============================================================================
+// URLab.Assets.TheDeepestProjectFolderWins
+//
+// A recorded directory can sit under more than one project folder, and the
+// tail that keeps the most structure is the one naming the same place here.
+// Trying the markers in the order they happen to be declared picks whichever
+// word appears in the list first, which for a directory like
+// `<old>/Intermediate/<n>/Saved/<n>` is the shallower, wrong reading.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjDeepestFolderWinsTest, "URLab.Assets.TheDeepestProjectFolderWins",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMjDeepestFolderWinsTest::RunTest(const FString& Parameters)
+{
+	using namespace MjAssetProvenanceTests;
+
+	const FString Name = UniqueName();
+
+	// `Intermediate/` comes after `Saved/` in the marker list but FIRST in this
+	// path, so declaration order and path order disagree -- which is the whole
+	// point of the fixture.
+	FScratchTree Deep(FPaths::ConvertRelativePathToFull(
+		FPaths::ProjectIntermediateDir() / Name / TEXT("Saved") / Name));
+	FScratchTree Shallow(ScratchPath(Name));
+
+	const FString Right = Deep.Root / TEXT("part.obj");
+	const FString Wrong = Shallow.Root / TEXT("part.obj");
+	if (!TestTrue(TEXT("the deep mesh was written"), WriteMesh(Right))
+		|| !TestTrue(TEXT("the shallow mesh was written"), WriteMesh(Wrong)))
+	{
+		return false;
+	}
+
+	const FString AbsentRoot = FString(TEXT("/MjNoSuchCheckout_")) + UniqueName();
+	const FString SourceDir = AbsentRoot / TEXT("Intermediate") / Name / TEXT("Saved") / Name;
+
+	FScratchDoc Doc;
+	if (!Parse(*this, Doc, MeshModel(TEXT("part.obj")), SourceDir / TEXT("prov_ue.xml")))
+	{
+		return false;
+	}
+
+	UMjMesh* Mesh = Doc.Actor->FindComponentByClass<UMjMesh>();
+	if (!TestNotNull(TEXT("the mesh element"), Mesh))
+	{
+		return false;
+	}
+
+	const FString Resolved = MjResolveAssetPath(*Mesh, FString(), Mesh->File.Get(FString()));
+	TestEqual(TEXT("the tail keeping the most structure is the one used"), Resolved,
+		FPaths::ConvertRelativePathToFull(Right));
+	TestNotEqual(TEXT("not the shallower reading"), Resolved,
+		FPaths::ConvertRelativePathToFull(Wrong));
 	return true;
 }
 
