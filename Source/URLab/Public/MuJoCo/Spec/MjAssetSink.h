@@ -158,8 +158,14 @@ URLAB_API FString MjAssetElementName(const UMjNodeComponent& Element);
  * asset passes none, because the reader resolves a nested model against the
  * model file's own directory and through no asset directory at all
  * (`src/xml/xml_native_reader.cc:2303`). Empty when `File` is.
+ *
+ * `OutBaseDirectory` receives the directory the answer is relative to, which is
+ * not always the element's own: a path recovered by re-rooting resolved against
+ * a different base, and anything writing a file back has to use that same one or
+ * it writes where nothing will look.
  */
-URLAB_API FString MjResolveAssetPath(const UMjNodeComponent& Element, const FString& AssetDir, const FString& File);
+URLAB_API FString MjResolveAssetPath(const UMjNodeComponent& Element, const FString& AssetDir, const FString& File,
+	FString* OutBaseDirectory = nullptr);
 
 /**
  * The spec's asset pass.

@@ -10,11 +10,165 @@
 
 #include "Misc/FileHelper.h"
 #include "Misc/Paths.h"
+#include "Utils/URLabLogging.h"
 #include "MuJoCo/Spec/MjSpecRef.h"
 #include "MuJoCo/Spec/MjNodeComponent.h"
 
 namespace
 {
+/**
+ * `File` resolved against `Directory` re-rooted onto THIS project, when that is
+ * where the file turns out to be.
+ *
+ * Provenance is recorded as an absolute path when the spec is read, so the
+ * directory every asset `file` resolves against is a fact about the machine
+ * that imported it. Open the same content from a checkout at another path --
+ * another machine, or just a moved folder -- and every mesh resolves into a
+ * directory that is not there. Nothing is mounted in the VFS, and the compile
+ * fails reporting the mount name it was left holding, a mangled
+ * `<owner>_<file>`, rather than the path it went looking for.
+ *
+ * The recorded directory still says where under a project it sat, though, and
+ * that part is portable: the tail from `Saved/`, `Content/`, `Plugins/` or
+ * `Intermediate/` onward is re-rooted here and tried. It has to happen on the
+ * directory rather than on the resolved path, because a `file` that climbs back
+ * out with `..` -- which is what an import beside the project writes --
+ * collapses those segments away and leaves nothing to key on.
+ *
+ * Three things have to hold before a candidate is taken, because a marker is
+ * only a folder NAME and naming proves nothing:
+ *
+ *   - the directory above the tail -- where that project's root would have
+ *     been -- must be absent, so a live `/tmp/Saved/...` or a second project
+ *     next door is never answered with our own copy of a same-named file;
+ *   - the candidate must land under this project, so a `file` full of `..`
+ *     cannot climb back out to the machine-specific place it came from;
+ *   - the file must actually be there.
+ *
+ * Where more than one tail still qualifies -- an old project directory itself
+ * called `Saved` puts a marker above the real boundary, and both roots are
+ * equally gone -- the deepest wins, since the tail keeping the most structure
+ * is what reconstructs a plugin nested under `Content` correctly, and that is
+ * a great deal commoner than a project named after a project folder. It is
+ * logged when it happens, so a choice that was not forced is visible.
+ *
+ * A resolution that already works never reaches any of this, and a genuinely
+ * missing file is still reported missing.
+ */
+bool ResolveUnderThisProject(const FString& Directory, const FString& File, FString& OutPath, FString& OutBase)
+{
+	static const TCHAR* const ProjectFolders[] = {TEXT("/Saved/"), TEXT("/Content/"), TEXT("/Plugins/"), TEXT("/Intermediate/")};
+
+	// Normalized, then given the trailing separator back. Each marker carries
+	// one so that `Content` cannot match inside `ContentAddressable`, and
+	// NormalizeDirectoryName strips exactly that character -- which left a spec
+	// sitting DIRECTLY in `<Project>/Saved` or `<Project>/Content` matching
+	// nothing at all, the one case where the tail is the whole directory.
+	FString Normalized = Directory;
+	FPaths::NormalizeDirectoryName(Normalized);
+	Normalized.AppendChar(TEXT('/'));
+
+	FString ProjectRoot = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir());
+	if (!ProjectRoot.EndsWith(TEXT("/")))
+	{
+		ProjectRoot.AppendChar(TEXT('/'));
+	}
+
+	// Every point where the recorded directory crosses into a project folder,
+	// rather than whichever marker comes first in the list above: a directory
+	// like `<old>/Plugins/MyPlugin/Content/Models` sits under two of them, and
+	// the tail keeping the most structure is the one that names the same place
+	// here. Tried longest first, so the plugin-relative reading wins over the
+	// bare `Content/` one; a marker that was really part of the old machine's
+	// path ABOVE its project just names a candidate that is not there.
+	TArray<int32> Tails;
+	for (const TCHAR* const Folder : ProjectFolders)
+	{
+		int32 At = INDEX_NONE;
+		while ((At = Normalized.Find(Folder, ESearchCase::IgnoreCase, ESearchDir::FromStart, At + 1)) != INDEX_NONE)
+		{
+			Tails.AddUnique(At + 1);
+		}
+	}
+	Tails.Sort();
+
+	// Gathered rather than returned on sight. More than one tail can name an
+	// existing file -- an old project directory itself called `Saved` puts a
+	// marker above the real boundary, and both roots are equally gone, so no
+	// amount of checking the roots separates them. The deepest still wins,
+	// because the tail keeping the most structure is the one that reconstructs
+	// a nested plugin correctly and that case is far commoner than a project
+	// named after a project folder. But a second viable answer means the choice
+	// was not forced, and that is said out loud rather than resolved quietly.
+	TArray<TPair<FString, FString>> Viable;
+	for (const int32 Tail : Tails)
+	{
+		FString RecordedRoot = Normalized.Left(Tail - 1);
+		if (RecordedRoot.IsEmpty() || RecordedRoot.EndsWith(TEXT(":")))
+		{
+			// The marker started the path, so the root it sat under is the
+			// filesystem root itself -- which is always there, and so always
+			// refuses below. Skipping the check for this case instead would
+			// make `/Saved/x` the one recorded directory that rebases without
+			// any provenance at all.
+			RecordedRoot += TEXT("/");
+		}
+		if (FPaths::DirectoryExists(RecordedRoot))
+		{
+			continue;
+		}
+
+		const FString Rebased = FPaths::Combine(ProjectRoot, Normalized.RightChop(Tail));
+		const FString Candidate = FPaths::ConvertRelativePathToFull(FPaths::Combine(Rebased, File));
+
+		// It has to land under THIS project, or it is not what this is for. A
+		// `file` carrying enough `..` climbs straight back out of whatever it
+		// is rebased onto -- and a model that referenced something outside any
+		// project to begin with would then be "rescued" to the very
+		// machine-specific location that makes it unportable, which is the
+		// opposite of the point.
+		if (!Candidate.StartsWith(ProjectRoot) || !FPaths::FileExists(Candidate))
+		{
+			continue;
+		}
+		if (!Viable.ContainsByPredicate([&Candidate](const TPair<FString, FString>& Seen) { return Seen.Key == Candidate; }))
+		{
+			Viable.Emplace(Candidate, Rebased);
+		}
+	}
+
+	if (Viable.Num() == 0)
+	{
+		return false;
+	}
+
+	if (Viable.Num() > 1)
+	{
+		FString Alternatives;
+		for (int32 Index = 1; Index < Viable.Num(); ++Index)
+		{
+			Alternatives += FString::Printf(TEXT("%s'%s'"), Index > 1 ? TEXT(", ") : TEXT(""), *Viable[Index].Key);
+		}
+		UE_LOG(LogURLab, Warning,
+			TEXT("Asset '%s' could be recovered from more than one place under this project; taking the deepest ")
+				TEXT("match '%s' over %s. Check that it is the one you meant."),
+			*File, *Viable[0].Key, *Alternatives);
+	}
+
+	// Said out loud. This is a recovery, not a normal read: it answers with
+	// a file the document did not name, and the one way it can still be
+	// wrong is a same-named file under a same-shaped tail. Nobody should
+	// have to guess that it happened.
+	UE_LOG(LogURLab, Warning,
+		TEXT("Asset '%s' was not at '%s'; using '%s' from this project instead (the recorded ")
+			TEXT("project directory is not on this machine)."),
+		*File, *FPaths::ConvertRelativePathToFull(FPaths::Combine(Directory, File)), *Viable[0].Key);
+
+	OutPath = Viable[0].Key;
+	OutBase = Viable[0].Value;
+	return true;
+}
+
 /**
  * The directory an asset path resolves against.
  *
@@ -194,18 +348,66 @@ FString MjAssetElementName(const UMjNodeComponent& Element)
 	return FString();
 }
 
-FString MjResolveAssetPath(const UMjNodeComponent& Element, const FString& AssetDir, const FString& File)
+FString MjResolveAssetPath(const UMjNodeComponent& Element, const FString& AssetDir, const FString& File,
+	FString* OutBaseDirectory)
 {
 	if (File.IsEmpty())
 	{
 		return FString();
 	}
+
+	// Reported before anything can fail, so a caller always learns which
+	// directory the answer belongs to even when the answer is the one nobody
+	// could open.
+	const FString Base = AssetBaseDirectory(Element, AssetDir);
+	if (OutBaseDirectory != nullptr)
+	{
+		*OutBaseDirectory = Base;
+	}
 	// MuJoCo takes an absolute `file` as it stands; only a relative one goes
 	// through the directories. A spec whose asset was exported back out of
 	// Unreal with nowhere relative to be is the case that makes the difference.
-	return FPaths::IsRelative(File)
-			 ? FPaths::ConvertRelativePathToFull(FPaths::Combine(AssetBaseDirectory(Element, AssetDir), File))
-			 : File;
+	if (!FPaths::IsRelative(File))
+	{
+		return File;
+	}
+
+	const FString Resolved = FPaths::ConvertRelativePathToFull(FPaths::Combine(Base, File));
+
+	// A short circuit, not the guarantee. What keeps a resolvable path from
+	// being redirected is the check below that the recorded project root is
+	// absent: a file sitting at `Base/File` means `Base` is on this machine,
+	// which means that root is too, so the rebase is refused whether or not
+	// this returns first. Deleting these four lines changes no answer -- only
+	// how much work is done to reach it.
+	if (FPaths::FileExists(Resolved))
+	{
+		return Resolved;
+	}
+
+	// Not where provenance said. It may be the same place under a project that
+	// has since moved, which is what opening the content on a second machine
+	// looks like from here.
+	FString Rebased;
+	FString RebasedBase;
+	if (ResolveUnderThisProject(Base, File, Rebased, RebasedBase))
+	{
+		// The base goes with it. Anything that writes a file back for this
+		// element -- MjSyncAssetFiles dumping a mesh whose asset and file have
+		// parted company -- places it relative to this directory, and the old
+		// one names a checkout that is not on this machine: the write lands in
+		// a stray tree, or fails outright, and the next compile still finds
+		// nothing.
+		if (OutBaseDirectory != nullptr)
+		{
+			*OutBaseDirectory = RebasedBase;
+		}
+		return Rebased;
+	}
+
+	// Still the path provenance asked for: this is the one a caller reports as
+	// missing, and it should name what was actually looked for.
+	return Resolved;
 }
 
 void FMjAssetSink::Collect(const FSpecRef& Spec)
@@ -261,7 +463,8 @@ void FMjAssetSink::Collect(const FSpecRef& Spec)
 			if (!File.IsEmpty())
 			{
 				Request.File = File;
-				Request.ResolvedPath = MjResolveAssetPath(*Asset.Node, bTexture ? TextureDir : MeshDir, File);
+				Request.ResolvedPath =
+					MjResolveAssetPath(*Asset.Node, bTexture ? TextureDir : MeshDir, File, &Request.BaseDirectory);
 				// Under a prefix the caller points the reference at whatever this
 				// emits, so a basename carries it. Without one nothing rewrites
 				// anything and the reference still says what the document said,
