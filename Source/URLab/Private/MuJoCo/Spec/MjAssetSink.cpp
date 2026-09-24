@@ -23,6 +23,55 @@ namespace
  * an included sub-spec's assets resolve beside the include rather than
  * beside the root -- which is the whole reason provenance is per element.
  */
+/**
+ * `File` resolved against `Directory` re-rooted onto THIS project, when that is
+ * where the file turns out to be.
+ *
+ * Provenance is recorded as an absolute path when the spec is read, so the
+ * directory every asset `file` resolves against is a fact about the machine
+ * that imported it. Open the same content from a checkout at another path --
+ * another machine, or just a moved folder -- and every mesh resolves into a
+ * directory that is not there. Nothing is mounted in the VFS, and the compile
+ * fails reporting the mount name it was left holding, a mangled
+ * `<owner>_<file>`, rather than the path it went looking for.
+ *
+ * The recorded directory still says where under a project it sat, though, and
+ * that part is portable: the tail from `Saved/`, `Content/`, `Plugins/` or
+ * `Intermediate/` onward is re-rooted here and tried. It has to happen on the
+ * directory rather than on the resolved path, because a `file` that climbs back
+ * out with `..` -- which is what an import beside the project writes --
+ * collapses those segments away and leaves nothing to key on.
+ *
+ * Only a path that has already failed to resolve reaches this, and only a
+ * candidate that exists is returned, so a resolution that works is never
+ * redirected and a genuinely missing file is still reported missing.
+ */
+bool ResolveUnderThisProject(const FString& Directory, const FString& File, FString& OutPath)
+{
+	static const TCHAR* const ProjectFolders[] = {TEXT("/Saved/"), TEXT("/Content/"), TEXT("/Plugins/"), TEXT("/Intermediate/")};
+
+	FString Normalized = Directory;
+	FPaths::NormalizeDirectoryName(Normalized);
+	for (const TCHAR* const Folder : ProjectFolders)
+	{
+		// From the end: the project's own location may well contain one of
+		// these words, and it is the last one that starts the tail.
+		const int32 At = Normalized.Find(Folder, ESearchCase::IgnoreCase, ESearchDir::FromEnd);
+		if (At == INDEX_NONE)
+		{
+			continue;
+		}
+		const FString Rebased = FPaths::Combine(FPaths::ProjectDir(), Normalized.RightChop(At + 1));
+		const FString Candidate = FPaths::ConvertRelativePathToFull(FPaths::Combine(Rebased, File));
+		if (FPaths::FileExists(Candidate))
+		{
+			OutPath = Candidate;
+			return true;
+		}
+	}
+	return false;
+}
+
 FString AssetBaseDirectory(const UMjNodeComponent& Element, const FString& AssetDir)
 {
 	const FString SourceDir = Element.SourceFile.IsEmpty() ? FString() : FPaths::GetPath(Element.SourceFile);
@@ -203,9 +252,30 @@ FString MjResolveAssetPath(const UMjNodeComponent& Element, const FString& Asset
 	// MuJoCo takes an absolute `file` as it stands; only a relative one goes
 	// through the directories. A spec whose asset was exported back out of
 	// Unreal with nowhere relative to be is the case that makes the difference.
-	return FPaths::IsRelative(File)
-			 ? FPaths::ConvertRelativePathToFull(FPaths::Combine(AssetBaseDirectory(Element, AssetDir), File))
-			 : File;
+	if (!FPaths::IsRelative(File))
+	{
+		return File;
+	}
+
+	const FString Base = AssetBaseDirectory(Element, AssetDir);
+	const FString Resolved = FPaths::ConvertRelativePathToFull(FPaths::Combine(Base, File));
+	if (FPaths::FileExists(Resolved))
+	{
+		return Resolved;
+	}
+
+	// Not where provenance said. It may be the same place under a project that
+	// has since moved, which is what opening the content on a second machine
+	// looks like from here.
+	FString Rebased;
+	if (ResolveUnderThisProject(Base, File, Rebased))
+	{
+		return Rebased;
+	}
+
+	// Still the path provenance asked for: this is the one a caller reports as
+	// missing, and it should name what was actually looked for.
+	return Resolved;
 }
 
 void FMjAssetSink::Collect(const FSpecRef& Spec)
