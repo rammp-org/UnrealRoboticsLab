@@ -760,26 +760,37 @@ void AAMjManager::ApplyLatestRenderState()
 	const TArray<AMjArticulation*>& Arts = PhysicsEngine->GetAllArticulations();
 	const TArray<UMjQuickConvertComponent*> Quicks = PhysicsEngine->GetAllQuickComponents();
 
-	PhysicsEngine->WithRenderState([&](const FMjRenderSnapshot& Snap) {
-		for (AMjArticulation* Art : Arts)
+	// Copy the frame out and apply it after releasing the snapshot lock. The
+	// stepping thread takes that lock to publish, and applying a frame moves
+	// every body and geom component in the scene -- milliseconds on a large
+	// model, tens of them on a slow frame -- while copying it is microseconds.
+	// Applying under the lock held the stepper behind the game thread for
+	// most of every frame: a 140-body, 485-geom robot stepped at about a
+	// quarter of real time with MuJoCo itself idle 95% of the time.
+	//
+	// Game thread only, and used start to finish within this call, so one
+	// buffer serves every call and keeps its allocations between frames.
+	static FMjRenderSnapshot Applied;
+	PhysicsEngine->WithRenderState([](const FMjRenderSnapshot& Snap) { Applied = Snap; });
+
+	for (AMjArticulation* Art : Arts)
+	{
+		if (Art)
 		{
-			if (Art)
-			{
-				Art->ApplyRenderState(Snap);
-			}
+			Art->ApplyRenderState(Applied);
 		}
-		for (UMjQuickConvertComponent* Quick : Quicks)
+	}
+	for (UMjQuickConvertComponent* Quick : Quicks)
+	{
+		if (Quick)
 		{
-			if (Quick)
-			{
-				Quick->ApplyRenderState(Snap);
-			}
+			Quick->ApplyRenderState(Applied);
 		}
-		// Record which post-step state the actors now reflect so cameras can
-		// tag their readbacks with it (frame_id association for the bridge).
-		LastAppliedRenderFrameId.store(Snap.FrameId, std::memory_order_release);
-		LastAppliedRenderSimTime.store(Snap.SimTime, std::memory_order_release);
-	});
+	}
+	// Record which post-step state the actors now reflect so cameras can
+	// tag their readbacks with it (frame_id association for the bridge).
+	LastAppliedRenderFrameId.store(Applied.FrameId, std::memory_order_release);
+	LastAppliedRenderSimTime.store(Applied.SimTime, std::memory_order_release);
 }
 
 AAMjManager* AAMjManager::GetManager()
