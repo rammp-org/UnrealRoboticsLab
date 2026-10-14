@@ -29,7 +29,9 @@
 #include "MujocoGenerationAction.h"
 #include "MujocoImportFactory.h"
 #include "MuJoCo/Core/MjArticulation.h"
+#include "MuJoCo/Gen/Elements/MjModel.gen.h"
 #include "MuJoCo/Spec/MjNodeComponent.h"
+#include "MuJoCo/Spec/MjProjectPaths.h"
 #include "MuJoCo/Spec/MjSpecRef.h"
 
 namespace
@@ -184,6 +186,35 @@ FString FactoryRecordedSource(const UBlueprint* Blueprint)
 	}
 	const AMjArticulation* CDO = Cast<AMjArticulation>(Blueprint->GeneratedClass->GetDefaultObject());
 	return CDO != nullptr ? CDO->MuJoCoXMLFile.FilePath : FString();
+}
+
+/** True when every element that records where it came from records it relative
+ *  to the project -- the model root included. */
+bool FactoryProvenanceIsProjectRelative(const UBlueprint* Blueprint)
+{
+	if (Blueprint == nullptr || Blueprint->SimpleConstructionScript == nullptr || Blueprint->GeneratedClass == nullptr)
+	{
+		return false;
+	}
+	int32 Recorded = 0;
+	for (const USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+	{
+		const UMjNodeComponent* Element = Node != nullptr ? Cast<UMjNodeComponent>(Node->ComponentTemplate) : nullptr;
+		if (Element != nullptr && !Element->SourceFile.IsEmpty())
+		{
+			++Recorded;
+			if (!FPaths::IsRelative(Element->SourceFile))
+			{
+				return false;
+			}
+		}
+	}
+	const AMjArticulation* CDO = Cast<AMjArticulation>(Blueprint->GeneratedClass->GetDefaultObject());
+	if (CDO != nullptr && CDO->Spec != nullptr && !FPaths::IsRelative(CDO->Spec->SourceFile))
+	{
+		return false;
+	}
+	return Recorded > 0;
 }
 
 /** True when the Blueprint's spec holds an element the model named `MjName`. */
@@ -577,8 +608,12 @@ bool FMjImportReimportMatchesImport::RunTest(const FString& Parameters)
 		return false;
 	}
 
-	// The recorded source is the model, not the prepared copy that was parsed.
-	TestEqual(TEXT("the Blueprint records the original path"), FactoryRecordedSource(Blueprint), SourceXml);
+	// The recorded source is the model, not the prepared copy that was parsed --
+	// and, the model being inside the project, recorded relative to it.
+	TestEqual(TEXT("the Blueprint records the original path"),
+		MjProjectAbsolutePath(FactoryRecordedSource(Blueprint)), SourceXml);
+	TestTrue(TEXT("relative to the project"), FPaths::IsRelative(FactoryRecordedSource(Blueprint)));
+	TestTrue(TEXT("and so is every element's provenance"), FactoryProvenanceIsProjectRelative(Blueprint));
 
 	const TArray<FString> NamesBefore = FactoryComponentNames(Blueprint);
 	const FString MjcfBefore = FactorySpecMjcf(Blueprint);
@@ -604,7 +639,8 @@ bool FMjImportReimportMatchesImport::RunTest(const FString& Parameters)
 		FString::Join(NamesBefore, TEXT(", ")));
 	TestEqual(TEXT("reimport lands on the same authored values"), FactorySpecMjcf(Blueprint), MjcfBefore);
 	TestEqual(TEXT("reimport leaves the recorded source alone"),
-		FactoryRecordedSource(Blueprint), SourceXml);
+		MjProjectAbsolutePath(FactoryRecordedSource(Blueprint)), SourceXml);
+	TestTrue(TEXT("and still relative, element by element"), FactoryProvenanceIsProjectRelative(Blueprint));
 
 	return true;
 }
