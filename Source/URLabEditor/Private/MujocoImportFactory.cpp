@@ -21,6 +21,7 @@
 // CoACD (MIT), and libzmq (MPL 2.0). See ThirdPartyNotices.txt for details.
 
 #include "MujocoImportFactory.h"
+#include "MjProvenanceLibrary.h"
 #include "MjImportOptionsDialog.h"
 #include "MujocoGenerationAction.h"
 #include "MjPythonHelper.h"
@@ -325,7 +326,7 @@ bool UMujocoImportFactory::ImportModel(const FString& SourceXmlPath, const FMjIm
 	// machine's folders (MjProjectPaths.h).
 	if (AMjArticulation* CDO = Cast<AMjArticulation>(OutBlueprint->GeneratedClass->GetDefaultObject()))
 	{
-		CDO->MuJoCoXMLFile.FilePath = MjProjectRelativePath(SourceXmlPath);
+		MjSetModelFile(*CDO, SourceXmlPath);
 		CDO->MarkPackageDirty();
 	}
 
@@ -382,7 +383,7 @@ void UMujocoImportFactory::SetReimportPaths(UObject* Obj, const TArray<FString>&
 	}
 	if (AMjArticulation* CDO = Cast<AMjArticulation>(Blueprint->GeneratedClass->GetDefaultObject()))
 	{
-		CDO->MuJoCoXMLFile.FilePath = MjProjectRelativePath(NewReimportPaths[0]);
+		MjSetModelFile(*CDO, NewReimportPaths[0]);
 		CDO->MarkPackageDirty();
 	}
 }

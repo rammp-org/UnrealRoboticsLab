@@ -9,6 +9,7 @@
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "EditorReimportHandler.h"
 #include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "Engine/World.h"
@@ -35,7 +36,9 @@
 #include "MujocoImportFactory.h"
 #include "MuJoCo/Core/MjArticulation.h"
 #include "MuJoCo/Gen/Elements/MjModel.gen.h"
+#include "MuJoCo/Spec/MjAssetSink.h"
 #include "MuJoCo/Spec/MjNodeComponent.h"
+#include "MuJoCo/Elements/MjMesh.h"
 #include "MuJoCo/Spec/MjProjectPaths.h"
 #include "MuJoCo/Spec/MjSpecRef.h"
 
@@ -1146,5 +1149,175 @@ bool FMjExternalModelKeepsAbsoluteProvenance::RunTest(const FString& Parameters)
 			break;
 		}
 	}
+	return true;
+}
+
+// ============================================================================
+// URLab.Import.ReimportCarriesTheModelPathToInstances
+//
+// Both ways the model path is written on a reimport -- SetReimportPaths, and
+// the import itself -- have to carry the change to what is built on the
+// articulation: a placed actor, and a child Blueprint whose path is inherited.
+// Left holding the old absolute value they would no longer match their
+// archetype, and reinstancing would keep it as an override.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjReimportCarriesTheModelPath,
+	"URLab.Import.ReimportCarriesTheModelPathToInstances",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMjReimportCarriesTheModelPath::RunTest(const FString& Parameters)
+{
+	const FString Dir = FactoryScratchDir(TEXT("CarryModelPath"));
+	const FString SourceXml = Dir / TEXT("carry_probe.xml");
+	FFileHelper::SaveStringToFile(FString(kFactoryProbeMjcf), *SourceXml);
+
+	FFactoryImportProbe Probe;
+	Probe.Run(SourceXml);
+	UBlueprint* Blueprint = Probe.AsBlueprint();
+	AMjArticulation* CDO = Blueprint != nullptr && Blueprint->GeneratedClass != nullptr
+							 ? Cast<AMjArticulation>(Blueprint->GeneratedClass->GetDefaultObject())
+							 : nullptr;
+	if (CDO == nullptr)
+	{
+		AddError(TEXT("import setup failed: no articulation produced"));
+		return false;
+	}
+
+	const FString Absolute = MjProjectAbsolutePath(CDO->MuJoCoXMLFile.FilePath);
+	UBlueprint* Child = FKismetEditorUtilities::CreateBlueprint(Blueprint->GeneratedClass, Probe.Package,
+		*(Probe.AssetName + TEXT("_Child")), BPTYPE_Normal, UBlueprint::StaticClass(),
+		UBlueprintGeneratedClass::StaticClass());
+	if (!TestNotNull(TEXT("a child Blueprint"), Child))
+	{
+		return false;
+	}
+	UWorld* World = UWorld::CreateWorld(EWorldType::Editor, /*bInformEngineOfWorld=*/false,
+		FName(*(FString(TEXT("MjCarry_")) + FGuid::NewGuid().ToString(EGuidFormats::Digits))));
+	if (!TestNotNull(TEXT("a scratch world"), World))
+	{
+		return false;
+	}
+	ON_SCOPE_EXIT
+	{
+		World->DestroyWorld(false);
+	};
+	AMjArticulation* Placed = Cast<AMjArticulation>(World->SpawnActor(Blueprint->GeneratedClass));
+	if (!TestNotNull(TEXT("a placed articulation"), Placed))
+	{
+		return false;
+	}
+
+	// How an older import left all three: the absolute path, the child's and the
+	// placed actor's simply following the parent's.
+	auto ChildDefaults = [Child]() {
+		return Cast<AMjArticulation>(Child->GeneratedClass->GetDefaultObject());
+	};
+	auto MakeLegacy = [&]() {
+		CDO->MuJoCoXMLFile.FilePath = Absolute;
+		ChildDefaults()->MuJoCoXMLFile.FilePath = Absolute;
+		Placed->MuJoCoXMLFile.FilePath = Absolute;
+	};
+
+	UMujocoImportFactory* Factory = NewObject<UMujocoImportFactory>();
+
+	MakeLegacy();
+	Factory->SetReimportPaths(Blueprint, {Absolute});
+	TestTrue(TEXT("SetReimportPaths records the path relative to the project"),
+		FPaths::IsRelative(CDO->MuJoCoXMLFile.FilePath));
+	TestEqual(TEXT("and the child's inherited path follows"), ChildDefaults()->MuJoCoXMLFile.FilePath,
+		CDO->MuJoCoXMLFile.FilePath);
+	TestEqual(TEXT("and so does the placed actor's"), Placed->MuJoCoXMLFile.FilePath, CDO->MuJoCoXMLFile.FilePath);
+
+	MakeLegacy();
+	TestEqual(TEXT("reimport succeeds"), static_cast<int32>(Factory->Reimport(Blueprint)),
+		static_cast<int32>(EReimportResult::Succeeded));
+	const AMjArticulation* Parent = Cast<AMjArticulation>(Blueprint->GeneratedClass->GetDefaultObject());
+	TestTrue(TEXT("reimport records the path relative to the project"),
+		Parent != nullptr && FPaths::IsRelative(Parent->MuJoCoXMLFile.FilePath));
+	TestEqual(TEXT("and the child's inherited path follows it through the recompile"),
+		ChildDefaults()->MuJoCoXMLFile.FilePath, Parent != nullptr ? Parent->MuJoCoXMLFile.FilePath : FString());
+	return true;
+}
+
+// ============================================================================
+// URLab.Import.AnExternalAssetKeepsItsElementAbsolute
+//
+// A model inside the project can still name an asset outside it, as a climb
+// from itself -- which is what mesh preparation writes even for an absolute
+// path. Read against another checkout's project that climb lands somewhere
+// else, so the element that names it keeps the absolute record that finds it;
+// the rest of the model goes relative.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjExternalAssetKeepsItsElementAbsolute,
+	"URLab.Import.AnExternalAssetKeepsItsElementAbsolute",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMjExternalAssetKeepsItsElementAbsolute::RunTest(const FString& Parameters)
+{
+	const FString Outside = FPaths::ConvertRelativePathToFull(FPlatformProcess::UserTempDir())
+						  / (FString(TEXT("MjExternalAsset_")) + FGuid::NewGuid().ToString(EGuidFormats::Digits));
+	ON_SCOPE_EXIT
+	{
+		IFileManager::Get().DeleteDirectory(*Outside, /*RequireExists=*/false, /*Tree=*/true);
+	};
+	const FString MeshPath = Outside / TEXT("part.obj");
+	if (!TestTrue(TEXT("the external mesh was written"),
+			FFileHelper::SaveStringToFile(FString(TEXT("v 0 0 0\nv 1 0 0\nv 0 1 0\nv 0 0 1\nf 1 2 3\nf 1 2 4\nf 1 3 4\nf 2 3 4\n")), *MeshPath)))
+	{
+		return false;
+	}
+	if (MjProjectRelativePath(MeshPath) != MeshPath)
+	{
+		AddInfo(TEXT("the temp directory is inside the project here; nothing external to test"));
+		return true;
+	}
+
+	const FString ModelDir = FactoryScratchDir(TEXT("ExternalAsset"));
+	FString File = MeshPath;
+	FPaths::MakePathRelativeTo(File, *(ModelDir / TEXT("")));
+	const FString Xml = FString::Printf(
+		TEXT("<mujoco model=\"external_asset\"><asset><mesh name=\"part\" file=\"%s\"/></asset>")
+			TEXT("<worldbody><body name=\"b\"><geom name=\"g\" type=\"mesh\" mesh=\"part\"/></body></worldbody></mujoco>"),
+		*File);
+
+	const FString Unique = FGuid::NewGuid().ToString(EGuidFormats::Digits).Left(12);
+	UPackage* Package = CreatePackage(*(FString(TEXT("/Temp/URLabExternalAsset_")) + Unique));
+	UBlueprint* Blueprint = FKismetEditorUtilities::CreateBlueprint(AMjArticulation::StaticClass(), Package,
+		*(FString(TEXT("ExternalAssetArt_")) + Unique), BPTYPE_Normal, UBlueprint::StaticClass(),
+		UBlueprintGeneratedClass::StaticClass());
+	if (!TestNotNull(TEXT("a scratch articulation"), Blueprint)
+		|| !TestTrue(TEXT("the model parses"), MjParseIntoBlueprint(*Blueprint, Xml, ModelDir / TEXT("external_asset.xml")).IsOk()))
+	{
+		return false;
+	}
+
+	MjMakeProvenanceProjectRelative(*Blueprint);
+
+	const UMjMesh* Mesh = nullptr;
+	const UMjNodeComponent* Other = nullptr;
+	for (const USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+	{
+		const UMjNodeComponent* Element = Node != nullptr ? Cast<UMjNodeComponent>(Node->ComponentTemplate) : nullptr;
+		if (Element == nullptr || Element->SourceFile.IsEmpty())
+		{
+			continue;
+		}
+		if (const UMjMesh* AsMesh = Cast<UMjMesh>(Element))
+		{
+			Mesh = AsMesh;
+		}
+		else if (Other == nullptr)
+		{
+			Other = Element;
+		}
+	}
+	if (!TestNotNull(TEXT("the mesh element"), Mesh) || !TestNotNull(TEXT("another element"), Other))
+	{
+		return false;
+	}
+	TestFalse(TEXT("the element naming an external file keeps its absolute record"), FPaths::IsRelative(Mesh->SourceFile));
+	TestEqual(TEXT("which still finds the file"), MjResolveAssetPath(*Mesh, FString(), Mesh->File.Get(FString())),
+		FPaths::ConvertRelativePathToFull(MeshPath));
+	TestTrue(TEXT("the rest of the model goes relative"), FPaths::IsRelative(Other->SourceFile));
 	return true;
 }
