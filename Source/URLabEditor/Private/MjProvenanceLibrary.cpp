@@ -20,44 +20,85 @@
 
 namespace
 {
-bool MakeRelative(UObject& Owner, FString& Record)
+/**
+ * Write the relative form of `Record` (a member of `Template`, reached through
+ * `RecordOf`) onto the template and onto every loaded instance still holding
+ * the old value. An instance left behind would differ from its new archetype,
+ * so reinstancing would keep the absolute path as though someone had set it,
+ * and the next save would write it out -- the rule CarryEditToInstances
+ * follows for any template edit. One that differs already was set on purpose
+ * and is left alone.
+ */
+template <typename TOwner>
+bool CarryRelative(TOwner& Template, FString& (*RecordOf)(TOwner&))
 {
-	const FString Relative = MjProjectRelativePath(Record);
-	if (Relative == Record)
+	const FString Old = RecordOf(Template);
+	const FString Relative = MjProjectRelativePath(Old);
+	if (Relative == Old)
 	{
 		return false;
 	}
-	Owner.Modify();
-	Record = Relative;
+	TArray<UObject*> Instances;
+	Template.GetArchetypeInstances(Instances);
+	for (UObject* Instance : Instances)
+	{
+		TOwner* Follower = Cast<TOwner>(Instance);
+		if (Follower != nullptr && RecordOf(*Follower) == Old)
+		{
+			Follower->Modify();
+			RecordOf(*Follower) = Relative;
+		}
+	}
+	Template.Modify();
+	RecordOf(Template) = Relative;
 	return true;
+}
+
+FString& SourceFileOf(UMjNodeComponent& Element)
+{
+	return Element.SourceFile;
+}
+
+FString& ModelFileOf(AMjArticulation& Articulation)
+{
+	return Articulation.MuJoCoXMLFile.FilePath;
 }
 } // namespace
 
 int32 MjMakeProvenanceProjectRelative(UBlueprint& Blueprint)
 {
 	int32 Changed = 0;
-	if (Blueprint.SimpleConstructionScript != nullptr)
+	AMjArticulation* Cdo = Blueprint.GeneratedClass != nullptr
+							 ? Cast<AMjArticulation>(Blueprint.GeneratedClass->GetDefaultObject())
+							 : nullptr;
+
+	// The elements are parsed from a prepared copy under Saved when mesh
+	// preparation runs, and that copy's asset paths climb back out to the model.
+	// For a model outside the project those climbs are only right from where
+	// the project sits now, so read against another checkout's project they land
+	// somewhere else: its elements keep the absolute record, as the model does.
+	const FString Model = Cdo != nullptr ? MjProjectAbsolutePath(Cdo->MuJoCoXMLFile.FilePath) : FString();
+	const bool bModelInProject = Model.IsEmpty() || MjProjectRelativePath(Model) != Model;
+
+	if (bModelInProject && Blueprint.SimpleConstructionScript != nullptr)
 	{
 		for (USCS_Node* Node : Blueprint.SimpleConstructionScript->GetAllNodes())
 		{
 			if (UMjNodeComponent* Element = Node != nullptr ? Cast<UMjNodeComponent>(Node->ComponentTemplate) : nullptr)
 			{
-				Changed += MakeRelative(*Element, Element->SourceFile) ? 1 : 0;
+				Changed += CarryRelative<UMjNodeComponent>(*Element, &SourceFileOf) ? 1 : 0;
 			}
 		}
 	}
-	// The model root is a default subobject of the articulation, not a node of
-	// its construction script, and the parse stamps it like any element.
-	AMjArticulation* Cdo = Blueprint.GeneratedClass != nullptr
-							 ? Cast<AMjArticulation>(Blueprint.GeneratedClass->GetDefaultObject())
-							 : nullptr;
 	if (Cdo != nullptr)
 	{
-		if (UMjModel* Root = Cdo->Spec.Get())
+		// The model root is a default subobject of the articulation, not a node
+		// of its construction script, and the parse stamps it like any element.
+		if (UMjModel* Root = Cdo->Spec.Get(); Root != nullptr && bModelInProject)
 		{
-			Changed += MakeRelative(*Root, Root->SourceFile) ? 1 : 0;
+			Changed += CarryRelative<UMjNodeComponent>(*Root, &SourceFileOf) ? 1 : 0;
 		}
-		Changed += MakeRelative(*Cdo, Cdo->MuJoCoXMLFile.FilePath) ? 1 : 0;
+		Changed += CarryRelative<AMjArticulation>(*Cdo, &ModelFileOf) ? 1 : 0;
 	}
 	if (Changed > 0)
 	{

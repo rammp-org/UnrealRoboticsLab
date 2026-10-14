@@ -21,11 +21,18 @@ FString ProjectRoot()
 	}
 	return Root;
 }
+
+/** Unreal's own relative form, relative to the engine's binaries directory.
+ *  A project record never climbs, so the two cannot be mistaken. */
+bool IsEngineRelative(const FString& Path)
+{
+	return Path == TEXT("..") || Path.StartsWith(TEXT("../")) || Path.StartsWith(TEXT("..\\"));
+}
 } // namespace
 
 FString MjProjectRelativePath(const FString& Path)
 {
-	if (Path.IsEmpty() || FPaths::IsRelative(Path))
+	if (Path.IsEmpty() || (FPaths::IsRelative(Path) && !IsEngineRelative(Path)))
 	{
 		return Path;
 	}
@@ -48,6 +55,10 @@ FString MjProjectAbsolutePath(const FString& Path)
 	if (Path.IsEmpty() || !FPaths::IsRelative(Path))
 	{
 		return Path;
+	}
+	if (IsEngineRelative(Path))
+	{
+		return FPaths::ConvertRelativePathToFull(Path);
 	}
 	return FPaths::ConvertRelativePathToFull(ProjectRoot(), Path);
 }

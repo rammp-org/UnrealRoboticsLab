@@ -23,18 +23,28 @@
 // relative record is read back against whichever project is open. A model
 // outside the project keeps its absolute path: there is nothing for it to be
 // relative to.
+//
+// Unreal has a relative form of its own: relative to the engine's binaries
+// directory (FPlatformProcess::BaseDir), which is how FPaths::ProjectDir() and
+// every path built from it read in the editor -- `../../../../<project>/...`.
+// Such a path is taken as exactly that, wherever it arrives: a project record
+// never climbs, so anything starting with `..` is Unreal's form, is converted
+// on the way in, and reads back as it always did.
 
 #include "CoreMinimal.h"
 
 /**
  * `Path` relative to this project's directory when it lies inside it. Any
- * other path -- empty, already relative, or outside the project -- comes back
- * unchanged.
+ * other path -- empty, already a project record, or outside the project --
+ * comes back unchanged. An Unreal-relative input (`../...`) is read against
+ * the engine's binaries directory first.
  */
 URLAB_API FString MjProjectRelativePath(const FString& Path);
 
 /**
- * The absolute path a recorded path names: a relative record is read against
- * this project's directory, an absolute or empty one is returned as it is.
+ * The absolute path a recorded path names: a project record is read against
+ * this project's directory, an Unreal-relative one (`../...`) against the
+ * engine's binaries directory as it always was, and an absolute or empty one
+ * is returned as it is.
  */
 URLAB_API FString MjProjectAbsolutePath(const FString& Path);

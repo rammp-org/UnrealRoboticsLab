@@ -19,10 +19,14 @@ class UBlueprint;
  * Record an imported articulation's provenance relative to the project wherever
  * it points inside it (MjProjectPaths.h): the SourceFile of every element in its
  * construction script and of its model root, and its MuJoCoXMLFile. Records
- * outside the project, empty, or already relative are left as they are.
+ * outside the project, empty, or already relative are left as they are, and so
+ * are the elements' records of a model that is itself outside the project (see
+ * the .cpp). Every loaded instance still holding a record's old value -- placed
+ * actors, child Blueprints' templates -- takes the new one too, so that
+ * reinstancing does not keep the old path as an override.
  *
- * Returns how many records changed, and marks the Blueprint's package dirty
- * when any did; saving is the caller's.
+ * Returns how many records changed on the Blueprint itself, and marks its
+ * package dirty when any did; saving is the caller's.
  */
 URLABEDITOR_API int32 MjMakeProvenanceProjectRelative(UBlueprint& Blueprint);
 

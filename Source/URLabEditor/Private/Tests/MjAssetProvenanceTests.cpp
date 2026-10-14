@@ -786,6 +786,22 @@ bool FMjProjectPathsRoundTripTest::RunTest(const FString& Parameters)
 	TestEqual(TEXT("an empty record stays empty"), MjProjectRelativePath(FString()), FString());
 	TestEqual(TEXT("both ways"), MjProjectAbsolutePath(FString()), FString());
 	TestEqual(TEXT("a relative record is already relative"), MjProjectRelativePath(Relative), Relative);
+
+	// Unreal's own relative form -- against the engine's binaries directory, as
+	// FPaths::ProjectDir() reads in the editor -- is not a project record.
+	FString EngineRelative = Inside;
+	if (FPaths::MakePathRelativeTo(EngineRelative, *FPaths::ConvertRelativePathToFull(FPlatformProcess::BaseDir()))
+		&& EngineRelative.StartsWith(TEXT("../")))
+	{
+		TestEqual(TEXT("an engine-relative input is recorded relative to the project"),
+			MjProjectRelativePath(EngineRelative), Relative);
+		TestEqual(TEXT("and an engine-relative record reads back as it always did"),
+			MjProjectAbsolutePath(EngineRelative), Inside);
+	}
+	else
+	{
+		AddInfo(TEXT("the engine and the project share no relative path here; engine-relative case not exercised"));
+	}
 	return true;
 }
 

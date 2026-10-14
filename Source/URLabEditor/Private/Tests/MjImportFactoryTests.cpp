@@ -11,6 +11,8 @@
 #include "Engine/Blueprint.h"
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
+#include "Engine/World.h"
+#include "GameFramework/Actor.h"
 #include "HAL/FileManager.h"
 #include "HAL/PlatformProcess.h"
 #include "IMessageLogListing.h"
@@ -18,6 +20,8 @@
 #include "MessageLogModule.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/FileHelper.h"
+#include "Misc/Guid.h"
+#include "Misc/ScopeExit.h"
 #include "Misc/Paths.h"
 #include "Modules/ModuleManager.h"
 #include "UObject/Package.h"
@@ -27,6 +31,7 @@
 
 #include "MjPythonHelper.h"
 #include "MujocoGenerationAction.h"
+#include "MjProvenanceLibrary.h"
 #include "MujocoImportFactory.h"
 #include "MuJoCo/Core/MjArticulation.h"
 #include "MuJoCo/Gen/Elements/MjModel.gen.h"
@@ -976,5 +981,170 @@ bool FMjImportUnattendedIsNeverPrompted::RunTest(const FString& Parameters)
 		TestNull(TEXT("and nothing is left behind"), Probe.Leftover());
 	}
 
+	return true;
+}
+
+// ============================================================================
+// URLab.Import.ProvenanceMigrationFollowsInstances
+//
+// An articulation imported before provenance was recorded relative to the
+// project carries absolute records, and so does every actor already spawned
+// from it. The migration has to move those instances along with the
+// templates: one left holding the old value no longer matches its archetype,
+// and reinstancing would keep the absolute path as a deliberate override.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjProvenanceMigrationFollowsInstances,
+	"URLab.Import.ProvenanceMigrationFollowsInstances",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMjProvenanceMigrationFollowsInstances::RunTest(const FString& Parameters)
+{
+	const FString Dir = FactoryScratchDir(TEXT("Migration"));
+	const FString SourceXml = Dir / TEXT("migration_probe.xml");
+	FFileHelper::SaveStringToFile(FString(kFactoryProbeMjcf), *SourceXml);
+
+	FFactoryImportProbe Probe;
+	Probe.Run(SourceXml);
+	UBlueprint* Blueprint = Probe.AsBlueprint();
+	if (Blueprint == nullptr || Blueprint->SimpleConstructionScript == nullptr)
+	{
+		AddError(TEXT("import setup failed: no Blueprint produced"));
+		return false;
+	}
+
+	// Back to how an older import left it: every record absolute.
+	AMjArticulation* CDO = Cast<AMjArticulation>(Blueprint->GeneratedClass->GetDefaultObject());
+	if (!TestNotNull(TEXT("the articulation's defaults"), CDO))
+	{
+		return false;
+	}
+	TArray<UMjNodeComponent*> Templates;
+	for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+	{
+		UMjNodeComponent* Element = Node != nullptr ? Cast<UMjNodeComponent>(Node->ComponentTemplate) : nullptr;
+		// Section elements (contact, size, visual ...) record no source; only
+		// the ones that do are under test.
+		if (Element != nullptr && !Element->SourceFile.IsEmpty())
+		{
+			Element->SourceFile = MjProjectAbsolutePath(Element->SourceFile);
+			Templates.Add(Element);
+		}
+	}
+	CDO->MuJoCoXMLFile.FilePath = MjProjectAbsolutePath(CDO->MuJoCoXMLFile.FilePath);
+	if (!TestTrue(TEXT("the probe has elements"), Templates.Num() > 0))
+	{
+		return false;
+	}
+
+	// An actor spawned from it now, before the migration.
+	UWorld* World = UWorld::CreateWorld(EWorldType::Editor, /*bInformEngineOfWorld=*/false,
+		FName(*(FString(TEXT("MjMigrate_")) + FGuid::NewGuid().ToString(EGuidFormats::Digits))));
+	if (!TestNotNull(TEXT("a scratch world"), World))
+	{
+		return false;
+	}
+	ON_SCOPE_EXIT
+	{
+		World->DestroyWorld(false);
+	};
+	AActor* Placed = World->SpawnActor(Blueprint->GeneratedClass);
+	if (!TestNotNull(TEXT("an actor spawned from the articulation"), Placed))
+	{
+		return false;
+	}
+	TArray<UMjNodeComponent*> Spawned;
+	for (UMjNodeComponent* Element : TInlineComponentArray<UMjNodeComponent*>(Placed))
+	{
+		if (!Element->SourceFile.IsEmpty())
+		{
+			Spawned.Add(Element);
+		}
+	}
+	if (!TestTrue(TEXT("the spawned actor has elements that record a source"), Spawned.Num() > 0))
+	{
+		return false;
+	}
+	for (const UMjNodeComponent* Element : Spawned)
+	{
+		if (!TestFalse(TEXT("and they hold the absolute record"), FPaths::IsRelative(Element->SourceFile)))
+		{
+			break;
+		}
+	}
+
+	const int32 Changed = MjMakeProvenanceProjectRelative(*Blueprint);
+	TestTrue(TEXT("the migration changed the records"), Changed >= Templates.Num());
+	TestTrue(TEXT("the templates are relative"), FactoryProvenanceIsProjectRelative(Blueprint));
+	TestTrue(TEXT("so is the model path"), FPaths::IsRelative(FactoryRecordedSource(Blueprint)));
+	for (const UMjNodeComponent* Element : Spawned)
+	{
+		if (!TestTrue(FString::Printf(TEXT("the spawned '%s' followed"), *Element->GetName()), FPaths::IsRelative(Element->SourceFile)))
+		{
+			break;
+		}
+	}
+	TestEqual(TEXT("a second pass has nothing left to do"), MjMakeProvenanceProjectRelative(*Blueprint), 0);
+	return true;
+}
+
+// ============================================================================
+// URLab.Import.ExternalModelKeepsAbsoluteProvenance
+//
+// A model outside the project, prepared under Saved, has elements whose asset
+// paths climb from the prepared copy back out to it. Those climbs only work
+// from where this project sits, so its elements keep their absolute records,
+// as the model's own path does.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjExternalModelKeepsAbsoluteProvenance,
+	"URLab.Import.ExternalModelKeepsAbsoluteProvenance",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMjExternalModelKeepsAbsoluteProvenance::RunTest(const FString& Parameters)
+{
+	const FString Dir = FactoryScratchDir(TEXT("External"));
+	const FString SourceXml = Dir / TEXT("external_probe.xml");
+	FFileHelper::SaveStringToFile(FString(kFactoryProbeMjcf), *SourceXml);
+
+	FFactoryImportProbe Probe;
+	Probe.Run(SourceXml);
+	UBlueprint* Blueprint = Probe.AsBlueprint();
+	if (Blueprint == nullptr || Blueprint->SimpleConstructionScript == nullptr)
+	{
+		AddError(TEXT("import setup failed: no Blueprint produced"));
+		return false;
+	}
+	AMjArticulation* CDO = Cast<AMjArticulation>(Blueprint->GeneratedClass->GetDefaultObject());
+	if (!TestNotNull(TEXT("the articulation's defaults"), CDO))
+	{
+		return false;
+	}
+
+	// The elements as a prepared copy under Saved records them, the model where
+	// it really lives: outside any project.
+	CDO->MuJoCoXMLFile.FilePath = FString(TEXT("/MjNoSuchCheckout_")) + FGuid::NewGuid().ToString(EGuidFormats::Digits) / TEXT("external_probe.xml");
+	int32 Elements = 0;
+	for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+	{
+		if (UMjNodeComponent* Element = Node != nullptr ? Cast<UMjNodeComponent>(Node->ComponentTemplate) : nullptr)
+		{
+			Element->SourceFile = MjProjectAbsolutePath(Element->SourceFile);
+			++Elements;
+		}
+	}
+	if (!TestTrue(TEXT("the probe has elements"), Elements > 0))
+	{
+		return false;
+	}
+
+	TestEqual(TEXT("nothing is made relative"), MjMakeProvenanceProjectRelative(*Blueprint), 0);
+	for (USCS_Node* Node : Blueprint->SimpleConstructionScript->GetAllNodes())
+	{
+		const UMjNodeComponent* Element = Node != nullptr ? Cast<UMjNodeComponent>(Node->ComponentTemplate) : nullptr;
+		if (Element != nullptr && !Element->SourceFile.IsEmpty()
+			&& !TestFalse(TEXT("an element keeps its absolute record"), FPaths::IsRelative(Element->SourceFile)))
+		{
+			break;
+		}
+	}
 	return true;
 }
