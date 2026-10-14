@@ -7,6 +7,7 @@
 //     http://www.apache.org/licenses/LICENSE-2.0
 
 #include "MujocoGenerationAction.h"
+#include "MjProvenanceLibrary.h"
 
 #include "EditorUtilityLibrary.h"
 #include "Engine/Blueprint.h"
@@ -24,6 +25,7 @@
 #include "MuJoCo/Spec/MjSpecRef.h"
 #include "MuJoCo/Spec/MjAssetResolve.h"
 #include "MuJoCo/Spec/MjNodeComponent.h"
+#include "MuJoCo/Spec/MjProjectPaths.h"
 #include "MuJoCo/Elements/MjMesh.h"
 #include "MuJoCo/Elements/MjTexture.h"
 
@@ -282,7 +284,7 @@ bool UMujocoGenerationAction::GenerateForSelectedBlueprint(UBlueprint* Blueprint
 		return false;
 	}
 
-	return GenerateForBlueprint(Blueprint, Cdo->MuJoCoXMLFile.FilePath);
+	return GenerateForBlueprint(Blueprint, MjProjectAbsolutePath(Cdo->MuJoCoXMLFile.FilePath));
 }
 
 void UMujocoGenerationAction::GenerateMuJoCoComponents()
@@ -337,6 +339,9 @@ bool UMujocoGenerationAction::GenerateFromXml(UBlueprint* Blueprint, const FStri
 	}
 
 	ImportSpecAssets(*Blueprint);
+
+	// The parse recorded the absolute path it read; keep it portable.
+	MjMakeProvenanceProjectRelative(*Blueprint);
 
 	FKismetEditorUtilities::CompileBlueprint(Blueprint);
 	return true;

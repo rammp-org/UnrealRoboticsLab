@@ -13,6 +13,7 @@
 #include "Utils/URLabLogging.h"
 #include "MuJoCo/Spec/MjSpecRef.h"
 #include "MuJoCo/Spec/MjNodeComponent.h"
+#include "MuJoCo/Spec/MjProjectPaths.h"
 
 namespace
 {
@@ -179,7 +180,10 @@ bool ResolveUnderThisProject(const FString& Directory, const FString& File, FStr
  */
 FString AssetBaseDirectory(const UMjNodeComponent& Element, const FString& AssetDir)
 {
-	const FString SourceDir = Element.SourceFile.IsEmpty() ? FString() : FPaths::GetPath(Element.SourceFile);
+	// A model inside the project is recorded relative to it (MjProjectPaths.h),
+	// and read back against whichever project is open.
+	const FString Source = MjProjectAbsolutePath(Element.SourceFile);
+	const FString SourceDir = Source.IsEmpty() ? FString() : FPaths::GetPath(Source);
 	if (AssetDir.IsEmpty())
 	{
 		return SourceDir;

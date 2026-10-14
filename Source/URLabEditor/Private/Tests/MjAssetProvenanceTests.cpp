@@ -39,6 +39,7 @@
 #include "MuJoCo/Elements/MjMesh.h"
 #include "MuJoCo/Spec/MjAssetFiles.h"
 #include "MuJoCo/Spec/MjAssetSink.h"
+#include "MuJoCo/Spec/MjProjectPaths.h"
 #include "MuJoCo/Spec/MjSpecBuild.h"
 #include "MuJoCo/Spec/MjSpecRef.h"
 
@@ -706,6 +707,101 @@ bool FMjMissingStillNamedTest::RunTest(const FString& Parameters)
 	FMjAssetSink Pass(Sink);
 	Pass.Collect(Doc.Ref());
 	TestEqual(TEXT("the mesh is reported missing"), Sink.Missing.Num(), 1);
+	return true;
+}
+
+// ============================================================================
+// URLab.Assets.AProjectRelativeRecordResolvesUnderThisProject
+//
+// What an import inside the project now records: the model's path relative to
+// the project. It names no machine's folders, so it resolves against whichever
+// project is open -- directly, with no recovery and no warning -- and a second
+// checkout on the same machine reads its own files rather than the first's.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjProjectRelativeRecordTest, "URLab.Assets.AProjectRelativeRecordResolvesUnderThisProject",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMjProjectRelativeRecordTest::RunTest(const FString& Parameters)
+{
+	using namespace MjAssetProvenanceTests;
+
+	FScratchTree Tree(ScratchPath(FString(TEXT("URLab/TestProvenance/")) + UniqueName()));
+	const FString MeshPath = Tree.Root / TEXT("meshes/part.obj");
+	if (!TestTrue(TEXT("the scratch mesh was written"), WriteMesh(MeshPath)))
+	{
+		return false;
+	}
+
+	const FString SourcePath = MjProjectRelativePath(Tree.Root / TEXT("prov.xml"));
+	TestTrue(TEXT("a model inside the project is recorded relative to it"), FPaths::IsRelative(SourcePath));
+	TestFalse(TEXT("and the record names nothing above the project"),
+		SourcePath.Contains(FPaths::ConvertRelativePathToFull(FPaths::ProjectDir())));
+
+	FScratchDoc Doc;
+	if (!Parse(*this, Doc, MeshModel(TEXT("meshes/part.obj")), SourcePath))
+	{
+		return false;
+	}
+	UMjMesh* Mesh = Doc.Actor->FindComponentByClass<UMjMesh>();
+	if (!TestNotNull(TEXT("the mesh element"), Mesh))
+	{
+		return false;
+	}
+	TestEqual(TEXT("the element keeps the relative record"), Mesh->SourceFile, SourcePath);
+	TestEqual(TEXT("the mesh resolves beside the model, under this project"),
+		MjResolveAssetPath(*Mesh, FString(), Mesh->File.Get(FString())), FPaths::ConvertRelativePathToFull(MeshPath));
+
+	FRecordingSink Sink;
+	FMjAssetSink Pass(Sink);
+	Pass.Collect(Doc.Ref());
+	TestEqual(TEXT("nothing was reported missing"), Sink.Missing.Num(), 0);
+	TestEqual(TEXT("one mesh was collected"), Sink.Found.Num(), 1);
+	return true;
+}
+
+// ============================================================================
+// URLab.Assets.ProjectPathsRoundTrip
+//
+// The two halves of the record agree: a path inside the project goes relative
+// and comes back to the same absolute path, and everything else -- outside the
+// project, already relative, empty -- passes through untouched.
+// ============================================================================
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjProjectPathsRoundTripTest, "URLab.Assets.ProjectPathsRoundTrip",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::ProductFilter)
+
+bool FMjProjectPathsRoundTripTest::RunTest(const FString& Parameters)
+{
+	using namespace MjAssetProvenanceTests;
+
+	const FString Inside = ScratchPath(TEXT("URLab/TestProvenance/round/trip.xml"));
+	const FString Relative = MjProjectRelativePath(Inside);
+	TestTrue(TEXT("inside the project goes relative"), FPaths::IsRelative(Relative));
+	TestFalse(TEXT("without climbing out"), Relative.StartsWith(TEXT("..")));
+	TestEqual(TEXT("and reads back to the same file"), MjProjectAbsolutePath(Relative), Inside);
+
+	const FString Outside = FString(TEXT("/MjNoSuchCheckout_")) + UniqueName() / TEXT("model.xml");
+	TestEqual(TEXT("outside the project is kept absolute"), MjProjectRelativePath(Outside), Outside);
+	TestEqual(TEXT("and is read back as it is"), MjProjectAbsolutePath(Outside), Outside);
+
+	TestEqual(TEXT("an empty record stays empty"), MjProjectRelativePath(FString()), FString());
+	TestEqual(TEXT("both ways"), MjProjectAbsolutePath(FString()), FString());
+	TestEqual(TEXT("a relative record is already relative"), MjProjectRelativePath(Relative), Relative);
+
+	// Unreal's own relative form -- against the engine's binaries directory, as
+	// FPaths::ProjectDir() reads in the editor -- is not a project record.
+	FString EngineRelative = Inside;
+	if (FPaths::MakePathRelativeTo(EngineRelative, *FPaths::ConvertRelativePathToFull(FPlatformProcess::BaseDir()))
+		&& EngineRelative.StartsWith(TEXT("../")))
+	{
+		TestEqual(TEXT("an engine-relative input is recorded relative to the project"),
+			MjProjectRelativePath(EngineRelative), Relative);
+		TestEqual(TEXT("and an engine-relative record reads back as it always did"),
+			MjProjectAbsolutePath(EngineRelative), Inside);
+	}
+	else
+	{
+		AddInfo(TEXT("the engine and the project share no relative path here; engine-relative case not exercised"));
+	}
 	return true;
 }
 

@@ -21,10 +21,12 @@
 // CoACD (MIT), and libzmq (MPL 2.0). See ThirdPartyNotices.txt for details.
 
 #include "MujocoImportFactory.h"
+#include "MjProvenanceLibrary.h"
 #include "MjImportOptionsDialog.h"
 #include "MujocoGenerationAction.h"
 #include "MjPythonHelper.h"
 #include "MuJoCo/Core/MjArticulation.h"
+#include "MuJoCo/Spec/MjProjectPaths.h"
 #include "HAL/FileManager.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Engine/Blueprint.h"
@@ -319,10 +321,12 @@ bool UMujocoImportFactory::ImportModel(const FString& SourceXmlPath, const FMjIm
 	}
 
 	// The ORIGINAL path, never the prepared copy: it is what the user chose,
-	// and it is what the next reimport has to prepare again from.
+	// and it is what the next reimport has to prepare again from. Recorded
+	// relative to the project when it is inside it, so the asset names no one
+	// machine's folders (MjProjectPaths.h).
 	if (AMjArticulation* CDO = Cast<AMjArticulation>(OutBlueprint->GeneratedClass->GetDefaultObject()))
 	{
-		CDO->MuJoCoXMLFile.FilePath = SourceXmlPath;
+		MjSetModelFile(*CDO, SourceXmlPath);
 		CDO->MarkPackageDirty();
 	}
 
@@ -366,7 +370,7 @@ bool UMujocoImportFactory::CanReimport(UObject* Obj, TArray<FString>& OutFilenam
 		return false;
 	}
 
-	OutFilenames.Add(CDO->MuJoCoXMLFile.FilePath);
+	OutFilenames.Add(MjProjectAbsolutePath(CDO->MuJoCoXMLFile.FilePath));
 	return true;
 }
 
@@ -379,7 +383,7 @@ void UMujocoImportFactory::SetReimportPaths(UObject* Obj, const TArray<FString>&
 	}
 	if (AMjArticulation* CDO = Cast<AMjArticulation>(Blueprint->GeneratedClass->GetDefaultObject()))
 	{
-		CDO->MuJoCoXMLFile.FilePath = NewReimportPaths[0];
+		MjSetModelFile(*CDO, NewReimportPaths[0]);
 		CDO->MarkPackageDirty();
 	}
 }
