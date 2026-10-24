@@ -1716,13 +1716,25 @@ bool UMjPhysicsEngine::DrainCommands()
 	FCommandQueue Local;
 	{
 		FScopeLock Lock(&CommandMutex);
-		if (PendingCommands.IsEmpty())
+		// Nothing pending still means work when last step's wrenches are due
+		// to come off.
+		if (PendingCommands.IsEmpty() && m_WrenchLastApplied.Num() == 0)
 			return false;
 		Local = MoveTemp(PendingCommands);
 		PendingCommands = FCommandQueue();
 	}
 
 	const int32 NBody = m_model->nbody;
+
+	// A wrench lasts one step: what the previous drain applied and nothing
+	// re-submitted goes back to zero before this drain's own writes land.
+	for (int32 BodyId : m_WrenchLastApplied)
+	{
+		if (BodyId < 0 || BodyId >= NBody || Local.WrenchSets.Contains(BodyId))
+			continue;
+		FMemory::Memzero(m_data->xfrc_applied + 6 * BodyId, sizeof(double) * 6);
+	}
+	m_WrenchLastApplied.Reset();
 
 	for (const TPair<int32, FMocapPose>& Pair : Local.MocapPoses)
 	{
@@ -1742,6 +1754,7 @@ bool UMjPhysicsEngine::DrainCommands()
 		if (BodyId < 0 || BodyId >= NBody)
 			continue;
 		FMemory::Memcpy(m_data->xfrc_applied + 6 * BodyId, Pair.Value.Xfrc, sizeof(Pair.Value.Xfrc));
+		m_WrenchLastApplied.Add(BodyId);
 	}
 	for (int32 BodyId : Local.WrenchClears)
 	{

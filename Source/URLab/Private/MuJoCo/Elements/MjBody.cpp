@@ -321,18 +321,76 @@ void UMjBody::ApplyForce(FVector Force, FVector Torque)
 		return;
 	}
 
-	// xfrc_applied is [torque xyz, force xyz]. Torque is already in N.m in both
-	// conventions; force arrives in newtons but the vector is an Unreal one, so
-	// only the Y flip and the cm-to-m scale apply.
-	const double InvScale = 0.01;
+	// xfrc_applied is [force xyz, torque xyz] in MuJoCo's world axes: the
+	// engine reads +0 as the force and +3 as the torque when it accumulates the
+	// wrench into cfrc (engine_core_smooth.c). Newtons and newton-metres are SI
+	// on both sides, so no scale applies, only the axis mirror. Under the Y
+	// mirror a force flips Y; a torque is a pseudovector and flips X and Z
+	// instead, the rule MjQuatToUe applies to a rotation.
 	double Xfrc[6];
-	Xfrc[0] = static_cast<double>(Torque.X);
-	Xfrc[1] = -static_cast<double>(Torque.Y);
-	Xfrc[2] = static_cast<double>(Torque.Z);
-	Xfrc[3] = static_cast<double>(Force.X) * InvScale;
-	Xfrc[4] = -static_cast<double>(Force.Y) * InvScale;
-	Xfrc[5] = static_cast<double>(Force.Z) * InvScale;
+	Xfrc[0] = static_cast<double>(Force.X);
+	Xfrc[1] = -static_cast<double>(Force.Y);
+	Xfrc[2] = static_cast<double>(Force.Z);
+	Xfrc[3] = -static_cast<double>(Torque.X);
+	Xfrc[4] = static_cast<double>(Torque.Y);
+	Xfrc[5] = -static_cast<double>(Torque.Z);
 	Engine->SubmitWrench(Id, Xfrc);
+}
+
+FVector UMjBody::GetAppliedForce() const
+{
+	int32 Id = 0;
+	if (!ResolveBodyId(this, Id))
+	{
+		return FVector::ZeroVector;
+	}
+	UMjPhysicsEngine* Engine = AAMjManager::ResolveEngine(this);
+	if (Engine == nullptr)
+	{
+		return FVector::ZeroVector;
+	}
+
+	FVector Result = FVector::ZeroVector;
+	Engine->WithRenderState([Id, &Result](const FMjRenderSnapshot& Snap) {
+		const int32 Idx = Id * 6;
+		if (Snap.XfrcApplied.Num() <= Idx + 5)
+		{
+			return;
+		}
+		// The force half of the wrench, back through the Y mirror.
+		Result.X = static_cast<float>(Snap.XfrcApplied[Idx]);
+		Result.Y = -static_cast<float>(Snap.XfrcApplied[Idx + 1]);
+		Result.Z = static_cast<float>(Snap.XfrcApplied[Idx + 2]);
+	});
+	return Result;
+}
+
+FVector UMjBody::GetAppliedTorque() const
+{
+	int32 Id = 0;
+	if (!ResolveBodyId(this, Id))
+	{
+		return FVector::ZeroVector;
+	}
+	UMjPhysicsEngine* Engine = AAMjManager::ResolveEngine(this);
+	if (Engine == nullptr)
+	{
+		return FVector::ZeroVector;
+	}
+
+	FVector Result = FVector::ZeroVector;
+	Engine->WithRenderState([Id, &Result](const FMjRenderSnapshot& Snap) {
+		const int32 Idx = Id * 6;
+		if (Snap.XfrcApplied.Num() <= Idx + 5)
+		{
+			return;
+		}
+		// The torque half, a pseudovector: X and Z flip back under the mirror.
+		Result.X = -static_cast<float>(Snap.XfrcApplied[Idx + 3]);
+		Result.Y = static_cast<float>(Snap.XfrcApplied[Idx + 4]);
+		Result.Z = -static_cast<float>(Snap.XfrcApplied[Idx + 5]);
+	});
+	return Result;
 }
 
 void UMjBody::ClearForce()
