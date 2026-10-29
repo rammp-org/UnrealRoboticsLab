@@ -376,8 +376,13 @@ UStaticMeshComponent* UMjGeom::MakeVisualizerPart(FName PartName, const TCHAR* M
 		return nullptr;
 	}
 
+	// Visibility traces only (MjPerturbation picks a body with one). Overlapping
+	// the object channels too had every moving part update its overlaps each
+	// frame: about 40 ms a frame on a robot of 800 geoms.
 	Part->SetCollisionEnabled(ECollisionEnabled::QueryOnly);
-	Part->SetCollisionResponseToAllChannels(ECR_Overlap);
+	Part->SetCollisionResponseToAllChannels(ECR_Ignore);
+	Part->SetCollisionResponseToChannel(ECC_Visibility, ECR_Overlap);
+	Part->SetGenerateOverlapEvents(false);
 
 	// Null for a mesh geom, whose asset is not a constant the shape table can
 	// hold; the caller assigns that one. Asking the loader for a null path
