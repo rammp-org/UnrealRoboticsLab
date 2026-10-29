@@ -26,6 +26,7 @@
 
 #if URLAB_MJ_GEN && WITH_EDITOR
 
+#include "Components/StaticMeshComponent.h"
 #include "Editor/UnrealEdEngine.h"
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
@@ -448,6 +449,56 @@ bool FMjElementVisualizerFloorsTinySiteMarker::RunTest(const FString& Parameters
 	const double Extent = FurthestFrom(PDI.Points, Site->GetComponentLocation());
 	TestTrue(FString::Printf(TEXT("a 1mm site's marker still reaches the locator floor, got %.2f cm"), Extent),
 		Extent >= 1.9);
+	return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjGeomPreviewOnlyAnswersVisibilityTraces,
+	"URLab.Editor.GeomPreviewOnlyAnswersVisibilityTraces",
+	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+
+bool FMjGeomPreviewOnlyAnswersVisibilityTraces::RunTest(const FString& Parameters)
+{
+	using namespace MjVisualizerTests;
+
+	const TCHAR* const Xml = TEXT(R"(<mujoco model="traced">
+  <worldbody>
+    <body name="base">
+      <geom name="ball" type="sphere" size="0.05"/>
+    </body>
+  </worldbody>
+</mujoco>
+)");
+
+	FScratchDoc Doc;
+	if (!Parse(*this, Doc, Xml))
+	{
+		return false;
+	}
+
+	UMjGeom* const Geom = ElementNamed<UMjGeom>(*Doc.Actor, TEXT("ball"));
+	if (!TestNotNull(TEXT("the geom component"), Geom))
+	{
+		return false;
+	}
+	Geom->RefreshPresentation();
+	const UStaticMeshComponent* const Preview = Geom->GetVisualizerMesh();
+	if (!TestNotNull(TEXT("a sphere geom builds its own preview mesh"), Preview))
+	{
+		return false;
+	}
+
+	// Perturbation picks a body with a Visibility trace; nothing else may see
+	// the preview, or every moving one updates its overlaps each frame.
+	TestEqual(TEXT("the preview answers queries only"), static_cast<int32>(Preview->GetCollisionEnabled()),
+		static_cast<int32>(ECollisionEnabled::QueryOnly));
+	TestEqual(TEXT("a Visibility trace sees it"), static_cast<int32>(Preview->GetCollisionResponseToChannel(ECC_Visibility)),
+		static_cast<int32>(ECR_Overlap));
+	for (const ECollisionChannel Channel : {ECC_WorldStatic, ECC_WorldDynamic, ECC_Pawn, ECC_PhysicsBody, ECC_Vehicle, ECC_Camera})
+	{
+		TestEqual(FString::Printf(TEXT("channel %d ignores it"), static_cast<int32>(Channel)),
+			static_cast<int32>(Preview->GetCollisionResponseToChannel(Channel)), static_cast<int32>(ECR_Ignore));
+	}
+	TestFalse(TEXT("it generates no overlap events"), Preview->GetGenerateOverlapEvents());
 	return true;
 }
 
