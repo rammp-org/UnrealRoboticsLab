@@ -63,7 +63,9 @@ struct FActuatorBinding
  * logic. The base class handles actuator→DOF binding automatically.
  *
  * Add your controller as a component on an AMjArticulation Blueprint.
- * ApplyControls() will find it and delegate control computation to it.
+ * ApplyControls() writes the articulation's staged controls, then calls the
+ * controller, which overwrites the actuators it drives: the others keep their
+ * staged values.
  *
  * Example:
  * @code
@@ -102,8 +104,9 @@ public:
 	virtual void Bind(mjModel* m, mjData* d, const TMap<int32, UMjNodeComponent*>& ActuatorIdMap);
 
 	/**
-	 * Called every physics step from AMjArticulation::ApplyControls().
-	 * Must write to d->ctrl[Bindings[i].ActuatorMjID] for each actuator.
+	 * Called every physics step from AMjArticulation::ApplyControls(), after
+	 * the staged controls are written. Writes d->ctrl for the actuators it
+	 * drives; an actuator it leaves alone keeps its staged value.
 	 * Runs on the async physics thread — must be thread-safe.
 	 *
 	 * @param m      The compiled MuJoCo model

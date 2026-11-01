@@ -6,8 +6,8 @@ A controller decides how a control target becomes joint torques. Attach one comp
 
 A control target arrives on each actuator component (`MjMotor`, `MjPosition`, `MjActuatorGeneral` and the rest) from ZMQ or Blueprint. When the articulation applies controls each physics step:
 
-- If the articulation has a controller component, the controller's compute step runs and writes `d->ctrl` (or torques) using its own control law.
-- If there is no controller, the raw target is written straight to `d->ctrl`. This is the right behaviour for position actuators, where MuJoCo runs the PD loop internally.
+- The raw target of each actuator the articulation owns is written straight to `d->ctrl`. With no controller, that is all. This is the right behaviour for position actuators, where MuJoCo runs the PD loop internally.
+- If the articulation has an enabled controller component, its compute step then runs and overwrites `d->ctrl` (or torques) for the actuators it drives, using its own control law. The actuators it leaves alone keep their raw targets, so a controller for part of a composed robot (an arm on a mobile base, say) does not silence the rest.
 
 ## Built-in controllers
 

@@ -488,12 +488,6 @@ void AMjArticulation::ApplyControls(mjModel* Model, mjData* Data, bool bSkipCont
 		return;
 	}
 
-	if (!bSkipController && CachedController != nullptr && CachedController->bEnabled && CachedController->IsBound())
-	{
-		CachedController->ComputeAndApply(Model, Data, ControlSource);
-		return;
-	}
-
 	if (bSkipController)
 	{
 		return;
@@ -507,6 +501,15 @@ void AMjArticulation::ApplyControls(mjModel* Model, mjData* Data, bool bSkipCont
 		{
 			Data->ctrl[Id] = static_cast<mjtNum>(ResolveDesiredControl(Id, ControlSource));
 		}
+	}
+
+	// The controller runs after the staged values and overwrites the actuators
+	// it drives. Those it does not drive keep their staged values, so on a
+	// composed articulation (a base and an arm in one model) an arm controller
+	// does not silence the base's commands.
+	if (CachedController != nullptr && CachedController->bEnabled && CachedController->IsBound())
+	{
+		CachedController->ComputeAndApply(Model, Data, ControlSource);
 	}
 }
 
