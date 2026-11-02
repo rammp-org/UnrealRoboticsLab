@@ -561,6 +561,14 @@ private:
 	FCriticalSection CommandMutex;
 	FCommandQueue PendingCommands;
 
+	/**
+	 * The bodies whose wrench the last drain wrote. MuJoCo never clears
+	 * `xfrc_applied`, so the next drain zeroes these unless the body was
+	 * submitted again: that is what makes one ApplyForce one step's worth.
+	 * Touched only by DrainCommands, on the stepping thread.
+	 */
+	TSet<int32> m_WrenchLastApplied;
+
 	/** Drains PendingCommands into m_data. Must be called by the
 	 *  stepping thread while it already holds CallbackMutex. Returns true
 	 *  iff it applied at least one command, so the caller can treat a mocap

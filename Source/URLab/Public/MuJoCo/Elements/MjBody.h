@@ -100,9 +100,10 @@ public:
 	 * Queue an external wrench on this body for the next step.
 	 *
 	 * Force in newtons, torque in newton-metres, both in Unreal axes. It lands
-	 * in `xfrc_applied`, which MuJoCo does not clear between steps but the
-	 * engine's drain overwrites per body per frame: one call is one step's worth
-	 * of push, so a sustained force is a call every tick.
+	 * in `xfrc_applied` for the next step and the drain after that zeroes it
+	 * unless it was submitted again: one call is one step's worth of push, so a
+	 * sustained force is a call every tick. Two calls before a step keep the
+	 * last.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "MuJoCo|Runtime")
 	void ApplyForce(FVector Force, FVector Torque);
@@ -110,6 +111,18 @@ public:
 	/** Zero this body's `xfrc_applied` on the next drain. */
 	UFUNCTION(BlueprintCallable, Category = "MuJoCo|Runtime")
 	void ClearForce();
+
+	/**
+	 * The force half of the wrench the last published step applied to this
+	 * body, in newtons and Unreal axes; zero when none was. Read through the
+	 * render snapshot like the velocity above.
+	 */
+	UFUNCTION(BlueprintCallable, Category = "MuJoCo|Runtime")
+	FVector GetAppliedForce() const;
+
+	/** The torque half, in newton-metres and Unreal axes. */
+	UFUNCTION(BlueprintCallable, Category = "MuJoCo|Runtime")
+	FVector GetAppliedTorque() const;
 
 	// --- Sleep ------------------------------------------------------------- //
 
