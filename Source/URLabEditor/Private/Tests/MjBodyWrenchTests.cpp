@@ -16,6 +16,7 @@
 #include "MuJoCo/Core/AMjManager.h"
 #include "MuJoCo/Core/MjPhysicsEngine.h"
 #include "MuJoCo/Elements/MjBody.h"
+#include "MuJoCo/Core/MjSimulationState.h"
 
 // ============================================================================
 // URLab.Runtime.ApplyForceLandsInXfrcApplied
@@ -138,6 +139,23 @@ bool FMjBodyApplyForceLifetimeTest::RunTest(const FString& Parameters)
 	Body->ClearForce();
 	Engine->StepSync(1);
 	TestEqual(TEXT("ClearForce zeroes the pending wrench"), Sum(), 0.0, 1e-9);
+
+	// A snapshot carries the held wrench, so a restore pushes as the run did.
+	Body->ApplyForce(FVector(4.0f, 0.0f, 0.0f), FVector::ZeroVector);
+	Engine->StepSync(1);
+	UMjSimulationState* Snap = Engine->CaptureSnapshot();
+	const TArray<double>* Held = Snap ? Snap->HeldWrenches.Find(BodyId) : nullptr;
+	TestTrue(TEXT("the snapshot holds the body's wrench"), Held && Held->Num() == 6 && FMath::IsNearlyEqual((*Held)[0], 4.0));
+
+	// A reset or a recompile drops held and queued wrenches.
+	Body->ApplyForce(FVector(8.0f, 0.0f, 0.0f), FVector::ZeroVector);
+	{
+		FScopeLock Lock(&Engine->CallbackMutex);
+		Engine->DropWrenchesLocked();
+	}
+	FMemory::Memzero(D->xfrc_applied, sizeof(mjtNum) * 6 * Engine->GetModel()->nbody);
+	Engine->StepSync(1);
+	TestEqual(TEXT("dropped wrenches, held and queued, stay off"), Sum(), 0.0, 1e-9);
 
 	S.Cleanup();
 	return true;

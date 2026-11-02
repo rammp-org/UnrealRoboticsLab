@@ -49,4 +49,8 @@ public:
 	/** @brief The simulation time when the snapshot was taken. */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "MuJoCo|Snapshot")
 	float SimTime = 0.0f;
+
+	/** @brief The wrenches UMjBody::ApplyForce held at capture (body id -> MuJoCo's six
+	 *  xfrc_applied numbers), restored with the state so a restored run is pushed as it was. */
+	TMap<int32, TArray<double>> HeldWrenches;
 };

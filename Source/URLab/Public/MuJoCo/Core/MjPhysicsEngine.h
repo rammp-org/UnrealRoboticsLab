@@ -191,6 +191,16 @@ public:
 	std::atomic<bool> bPendingRestore{false};
 	TArray<double> PendingStateVector;
 	int32 PendingStateMask = 0;
+	/** The held wrenches that go with PendingStateVector (UMjSimulationState::HeldWrenches). */
+	TMap<int32, TArray<double>> PendingHeldWrenches;
+
+	/**
+	 * Drop every wrench ApplyForce holds and every queued ApplyForce /
+	 * ClearForce: after a reset (a new episode) or a recompile (body ids
+	 * that name other bodies) none of them applies any more. The caller
+	 * holds CallbackMutex; this takes CommandMutex.
+	 */
+	void DropWrenchesLocked();
 
 	// --- Simulation Options ---
 
