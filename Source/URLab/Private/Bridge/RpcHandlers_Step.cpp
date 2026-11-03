@@ -546,6 +546,8 @@ TSharedPtr<FJsonObject> FURLabRpcDispatcher::HandleReset(const TSharedPtr<FJsonO
 		{
 			mj_resetData(m, d);
 		}
+		// A new episode starts without the last one's ApplyForce pushes.
+		Mgr->PhysicsEngine->DropWrenchesLocked();
 
 		// Per-articulation qpos overrides (joint-name -> value).
 		const TSharedPtr<FJsonObject>* PerArt = nullptr;

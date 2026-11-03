@@ -6,8 +6,8 @@
 // that does not apply to newtons: a 10 N push arrived as a 0.1 N.m twist about
 // the wrong axis, and nothing read the wrench back. These pin the layout
 // MuJoCo reads (force first, torque second), the axis mirror for a vector and
-// for a pseudovector, the readback, and the one-step lifetime the header
-// promises.
+// for a pseudovector, the readback, and the lifetime the header promises:
+// held until replaced or cleared.
 
 #include "CoreMinimal.h"
 #include "Misc/AutomationTest.h"
@@ -16,6 +16,7 @@
 #include "MuJoCo/Core/AMjManager.h"
 #include "MuJoCo/Core/MjPhysicsEngine.h"
 #include "MuJoCo/Elements/MjBody.h"
+#include "MuJoCo/Core/MjSimulationState.h"
 
 // ============================================================================
 // URLab.Runtime.ApplyForceLandsInXfrcApplied
@@ -71,12 +72,13 @@ bool FMjBodyApplyForceLayoutTest::RunTest(const FString& Parameters)
 }
 
 // ============================================================================
-// URLab.Runtime.ApplyForceLastsOneStep
-//   One call is one step's worth: the next drain takes it off unless it was
-//   submitted again, and ClearForce takes it off at once.
+// URLab.Runtime.ApplyForceHoldsUntilCleared
+//   A wrench stays on for every step until the next ApplyForce or a
+//   ClearForce, including steps whose xfrc_applied a pre-step callback
+//   zeroed (UMjPerturbation does on every step).
 // ============================================================================
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FMjBodyApplyForceLifetimeTest,
-	"URLab.Runtime.ApplyForceLastsOneStep",
+	"URLab.Runtime.ApplyForceHoldsUntilCleared",
 	EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
 
 bool FMjBodyApplyForceLifetimeTest::RunTest(const FString& Parameters)
@@ -98,7 +100,7 @@ bool FMjBodyApplyForceLifetimeTest::RunTest(const FString& Parameters)
 		return false;
 	}
 	const int32 BodyId = Body->GetBoundId().GetValue();
-	const double* Xfrc = D->xfrc_applied + 6 * BodyId;
+	double* Xfrc = D->xfrc_applied + 6 * BodyId;
 
 	auto Sum = [Xfrc]() {
 		double Total = 0.0;
@@ -111,24 +113,49 @@ bool FMjBodyApplyForceLifetimeTest::RunTest(const FString& Parameters)
 	Engine->StepSync(1);
 	TestEqual(TEXT("the wrench is on for the step after the call"), Xfrc[0], 5.0, 1e-9);
 
-	Engine->StepSync(1);
-	TestEqual(TEXT("and off for the step after that"), Sum(), 0.0, 1e-9);
+	Engine->StepSync(3);
+	TestEqual(TEXT("and stays on for the steps after that"), Xfrc[0], 5.0, 1e-9);
 
-	// Re-submitting each step keeps it on; the latest of two submissions in
-	// one step is the one that lands.
-	Body->ApplyForce(FVector(5.0f, 0.0f, 0.0f), FVector::ZeroVector);
-	Body->ApplyForce(FVector(7.0f, 0.0f, 0.0f), FVector::ZeroVector);
+	// What UMjPerturbation's pre-step callback does before every step.
+	FMemory::Memzero(D->xfrc_applied, sizeof(mjtNum) * 6 * Engine->GetModel()->nbody);
 	Engine->StepSync(1);
-	TestEqual(TEXT("the last submission before the step wins"), Xfrc[0], 7.0, 1e-9);
+	TestEqual(TEXT("a step whose xfrc_applied was zeroed gets it back"), Xfrc[0], 5.0, 1e-9);
+
+	// The latest of two submissions in one step is the one that lands, and
+	// replaces the held one.
+	Body->ApplyForce(FVector(6.0f, 0.0f, 0.0f), FVector::ZeroVector);
 	Body->ApplyForce(FVector(7.0f, 0.0f, 0.0f), FVector::ZeroVector);
+	Engine->StepSync(2);
+	TestEqual(TEXT("the last submission before the step wins, and holds"), Xfrc[0], 7.0, 1e-9);
+
+	Body->ClearForce();
 	Engine->StepSync(1);
-	TestEqual(TEXT("a call every step sustains it"), Xfrc[0], 7.0, 1e-9);
+	TestEqual(TEXT("ClearForce takes it off"), Sum(), 0.0, 1e-9);
+	Engine->StepSync(1);
+	TestEqual(TEXT("and it stays off"), Sum(), 0.0, 1e-9);
 
 	// ClearForce after a call in the same step: the clear wins.
 	Body->ApplyForce(FVector(9.0f, 0.0f, 0.0f), FVector::ZeroVector);
 	Body->ClearForce();
 	Engine->StepSync(1);
 	TestEqual(TEXT("ClearForce zeroes the pending wrench"), Sum(), 0.0, 1e-9);
+
+	// A snapshot carries the held wrench, so a restore pushes as the run did.
+	Body->ApplyForce(FVector(4.0f, 0.0f, 0.0f), FVector::ZeroVector);
+	Engine->StepSync(1);
+	UMjSimulationState* Snap = Engine->CaptureSnapshot();
+	const TArray<double>* Held = Snap ? Snap->HeldWrenches.Find(BodyId) : nullptr;
+	TestTrue(TEXT("the snapshot holds the body's wrench"), Held && Held->Num() == 6 && FMath::IsNearlyEqual((*Held)[0], 4.0));
+
+	// A reset or a recompile drops held and queued wrenches.
+	Body->ApplyForce(FVector(8.0f, 0.0f, 0.0f), FVector::ZeroVector);
+	{
+		FScopeLock Lock(&Engine->CallbackMutex);
+		Engine->DropWrenchesLocked();
+	}
+	FMemory::Memzero(D->xfrc_applied, sizeof(mjtNum) * 6 * Engine->GetModel()->nbody);
+	Engine->StepSync(1);
+	TestEqual(TEXT("dropped wrenches, held and queued, stay off"), Sum(), 0.0, 1e-9);
 
 	S.Cleanup();
 	return true;

@@ -1398,7 +1398,7 @@ void UMjSimulateWidget::HandleManagerOptionChanged(float NewValue, const FString
 	else if (OptionName == TEXT("Sim Speed %"))
 	{
 		if (PE)
-			PE->SimSpeedPercent = NewValue;
+			PE->SetSimSpeed(NewValue); // the worker paces by the shadow SetSimSpeed also writes
 	}
 	else if (OptionName == TEXT("Debug Enabled"))
 	{

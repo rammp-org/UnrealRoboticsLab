@@ -191,6 +191,16 @@ public:
 	std::atomic<bool> bPendingRestore{false};
 	TArray<double> PendingStateVector;
 	int32 PendingStateMask = 0;
+	/** The held wrenches that go with PendingStateVector (UMjSimulationState::HeldWrenches). */
+	TMap<int32, TArray<double>> PendingHeldWrenches;
+
+	/**
+	 * Drop every wrench ApplyForce holds and every queued ApplyForce /
+	 * ClearForce: after a reset (a new episode) or a recompile (body ids
+	 * that name other bodies) none of them applies any more. The caller
+	 * holds CallbackMutex; this takes CommandMutex.
+	 */
+	void DropWrenchesLocked();
 
 	// --- Simulation Options ---
 
@@ -329,8 +339,10 @@ public:
 	void RunMujocoAsync();
 	void SetPaused(bool bPaused);
 
-	/** Set the real-time speed target (percent). Writes the UPROPERTY (for
-	 *  the details panel) and the worker's lock-free shadow. */
+	/** Set the real-time speed target (percent, 5 to 100). Writes the
+	 *  UPROPERTY (for the details panel) and the worker's lock-free shadow;
+	 *  setting SimSpeedPercent alone at runtime reaches only the former. */
+	UFUNCTION(BlueprintCallable, Category = "MuJoCo|Options")
 	void SetSimSpeed(float Percent);
 
 	/** Single entry point for the runtime step mode. Stores the resolved mode
@@ -562,12 +574,13 @@ private:
 	FCommandQueue PendingCommands;
 
 	/**
-	 * The bodies whose wrench the last drain wrote. MuJoCo never clears
-	 * `xfrc_applied`, so the next drain zeroes these unless the body was
-	 * submitted again: that is what makes one ApplyForce one step's worth.
-	 * Touched only by DrainCommands, on the stepping thread.
+	 * Wrenches set by SubmitWrench and not cleared since, by body id. Every
+	 * drain writes them into `xfrc_applied` before the step: UMjPerturbation's
+	 * pre-step callback zeroes `xfrc_applied` on every step, and a game frame
+	 * runs several, so a wrench written once would act for one step of them.
+	 * Touched only under CallbackMutex, by the stepping thread.
 	 */
-	TSet<int32> m_WrenchLastApplied;
+	TMap<int32, FWrench> m_HeldWrenches;
 
 	/** Drains PendingCommands into m_data. Must be called by the
 	 *  stepping thread while it already holds CallbackMutex. Returns true

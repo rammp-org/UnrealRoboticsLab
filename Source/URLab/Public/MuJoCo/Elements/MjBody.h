@@ -97,18 +97,19 @@ public:
 	// --- Applied force ----------------------------------------------------- //
 
 	/**
-	 * Queue an external wrench on this body for the next step.
+	 * Hold an external wrench on this body, from the next step.
 	 *
-	 * Force in newtons, torque in newton-metres, both in Unreal axes. It lands
-	 * in `xfrc_applied` for the next step and the drain after that zeroes it
-	 * unless it was submitted again: one call is one step's worth of push, so a
-	 * sustained force is a call every tick. Two calls before a step keep the
-	 * last.
+	 * Force in newtons, torque in newton-metres, both in Unreal axes. The
+	 * engine writes it into `xfrc_applied` before every step until the next
+	 * ApplyForce or a ClearForce on this body: a force that follows a
+	 * controller is a call every tick (each one replaces the last, for all the
+	 * steps the frame runs), and a push ends with ClearForce. Two calls before
+	 * a step keep the last.
 	 */
 	UFUNCTION(BlueprintCallable, Category = "MuJoCo|Runtime")
 	void ApplyForce(FVector Force, FVector Torque);
 
-	/** Zero this body's `xfrc_applied` on the next drain. */
+	/** Stop the wrench ApplyForce holds on this body, from the next step. */
 	UFUNCTION(BlueprintCallable, Category = "MuJoCo|Runtime")
 	void ClearForce();
 

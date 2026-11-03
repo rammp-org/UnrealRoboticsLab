@@ -741,6 +741,8 @@ bool UMjPhysicsEngine::InstallCompiledSpec(FString& OutError)
 		InstalledScene = MakeUnique<urlab::spec::FMjCompiledScene>(MoveTemp(Compiled));
 		m_model = InstalledScene->Model;
 		m_data = NewData;
+		// Held and queued wrenches name the old model's body ids.
+		DropWrenchesLocked();
 
 		if (PreviousData != nullptr)
 		{
@@ -881,6 +883,7 @@ bool UMjPhysicsEngine::InstallCompiledSpec(FString& OutError)
 void UMjPhysicsEngine::ReleaseCompiledScene()
 {
 	FScopeLock Lock(&CallbackMutex);
+	DropWrenchesLocked();
 	if (m_data != nullptr)
 	{
 		mj_deleteData(m_data);
@@ -1052,6 +1055,8 @@ void UMjPhysicsEngine::RunMujocoAsync()
 					mj_forward(m_model, m_data);
 					bPendingReset = false;
 					bAdvanced = true;
+					// A new episode starts without the last one's pushes.
+					DropWrenchesLocked();
 
 					// Zero all actuator control values so stale commands
 					// don't persist after reset.
@@ -1090,6 +1095,7 @@ void UMjPhysicsEngine::RunMujocoAsync()
 				{
 					TArray<double> RestoreState;
 					int32 RestoreMask = 0;
+					TMap<int32, TArray<double>> RestoreWrenches;
 					{
 						// Swap the pending vector out under CommandMutex so a
 						// concurrent RestoreSnapshot can't tear it mid-read.
@@ -1098,11 +1104,24 @@ void UMjPhysicsEngine::RunMujocoAsync()
 						{
 							RestoreState = MoveTemp(PendingStateVector);
 							RestoreMask = PendingStateMask;
+							RestoreWrenches = MoveTemp(PendingHeldWrenches);
 							bPendingRestore = false;
 						}
 					}
 					if (RestoreState.Num() > 0)
 					{
+						// The held wrenches go back to the snapshot's, before this
+						// step's drain writes them.
+						m_HeldWrenches.Empty();
+						for (const TPair<int32, TArray<double>>& Pair : RestoreWrenches)
+						{
+							if (Pair.Value.Num() == 6)
+							{
+								FWrench W;
+								FMemory::Memcpy(W.Xfrc, Pair.Value.GetData(), sizeof(W.Xfrc));
+								m_HeldWrenches.Add(Pair.Key, W);
+							}
+						}
 						mj_setState(m_model, m_data, RestoreState.GetData(), RestoreMask);
 						mj_forward(m_model, m_data);
 						bAdvanced = true;
@@ -1409,6 +1428,10 @@ UMjSimulationState* UMjPhysicsEngine::CaptureSnapshot()
 		FScopeLock Lock(&CallbackMutex);
 		NewSnapshot->SimTime = (float)m_data->time;
 		mj_getState(m_model, m_data, NewSnapshot->StateVector.GetData(), Mask);
+		for (const TPair<int32, FWrench>& Pair : m_HeldWrenches)
+		{
+			NewSnapshot->HeldWrenches.Add(Pair.Key, TArray<double>(Pair.Value.Xfrc, 6));
+		}
 	}
 
 	UE_LOG(LogURLab, Log, TEXT("MuJoCo PhysicsEngine: Snapshot captured at t=%f (Size: %d)"), NewSnapshot->SimTime, nState);
@@ -1426,6 +1449,7 @@ void UMjPhysicsEngine::RestoreSnapshot(UMjSimulationState* Snapshot)
 		FScopeLock Lock(&CommandMutex);
 		PendingStateVector = Snapshot->StateVector;
 		PendingStateMask = Snapshot->StateMask;
+		PendingHeldWrenches = Snapshot->HeldWrenches;
 		bPendingRestore = true;
 	}
 
@@ -1608,6 +1632,14 @@ void UMjPhysicsEngine::SubmitWrench(int32 BodyId, const double Xfrc[6])
 	PendingCommands.WrenchClears.Remove(BodyId);
 }
 
+void UMjPhysicsEngine::DropWrenchesLocked()
+{
+	m_HeldWrenches.Empty();
+	FScopeLock Lock(&CommandMutex);
+	PendingCommands.WrenchSets.Empty();
+	PendingCommands.WrenchClears.Empty();
+}
+
 void UMjPhysicsEngine::SubmitClearForce(int32 BodyId)
 {
 	if (BodyId < 0)
@@ -1713,28 +1745,30 @@ bool UMjPhysicsEngine::DrainCommands()
 	if (!m_model || !m_data)
 		return false;
 
+	const int32 NBody = m_model->nbody;
+
+	// A held wrench goes back in before every step, whether or not anything is
+	// pending: a pre-step callback (UMjPerturbation's) zeroes xfrc_applied on
+	// every step, and a game frame runs several.
+	const auto WriteHeld = [this, NBody]() {
+		for (const TPair<int32, FWrench>& Pair : m_HeldWrenches)
+		{
+			if (Pair.Key >= 0 && Pair.Key < NBody)
+				FMemory::Memcpy(m_data->xfrc_applied + 6 * Pair.Key, Pair.Value.Xfrc, sizeof(Pair.Value.Xfrc));
+		}
+	};
+
 	FCommandQueue Local;
 	{
 		FScopeLock Lock(&CommandMutex);
-		// Nothing pending still means work when last step's wrenches are due
-		// to come off.
-		if (PendingCommands.IsEmpty() && m_WrenchLastApplied.Num() == 0)
+		if (PendingCommands.IsEmpty())
+		{
+			WriteHeld();
 			return false;
+		}
 		Local = MoveTemp(PendingCommands);
 		PendingCommands = FCommandQueue();
 	}
-
-	const int32 NBody = m_model->nbody;
-
-	// A wrench lasts one step: what the previous drain applied and nothing
-	// re-submitted goes back to zero before this drain's own writes land.
-	for (int32 BodyId : m_WrenchLastApplied)
-	{
-		if (BodyId < 0 || BodyId >= NBody || Local.WrenchSets.Contains(BodyId))
-			continue;
-		FMemory::Memzero(m_data->xfrc_applied + 6 * BodyId, sizeof(double) * 6);
-	}
-	m_WrenchLastApplied.Reset();
 
 	for (const TPair<int32, FMocapPose>& Pair : Local.MocapPoses)
 	{
@@ -1748,20 +1782,20 @@ bool UMjPhysicsEngine::DrainCommands()
 		FMemory::Memcpy(m_data->mocap_quat + 4 * MocapId, Pair.Value.Quat, sizeof(Pair.Value.Quat));
 	}
 
+	// A wrench holds until the next one or a clear on its body.
 	for (const TPair<int32, FWrench>& Pair : Local.WrenchSets)
 	{
-		const int32 BodyId = Pair.Key;
-		if (BodyId < 0 || BodyId >= NBody)
-			continue;
-		FMemory::Memcpy(m_data->xfrc_applied + 6 * BodyId, Pair.Value.Xfrc, sizeof(Pair.Value.Xfrc));
-		m_WrenchLastApplied.Add(BodyId);
+		if (Pair.Key >= 0 && Pair.Key < NBody)
+			m_HeldWrenches.Add(Pair.Key, Pair.Value);
 	}
 	for (int32 BodyId : Local.WrenchClears)
 	{
 		if (BodyId < 0 || BodyId >= NBody)
 			continue;
+		m_HeldWrenches.Remove(BodyId);
 		FMemory::Memzero(m_data->xfrc_applied + 6 * BodyId, sizeof(double) * 6);
 	}
+	WriteHeld();
 
 	return true;
 }
