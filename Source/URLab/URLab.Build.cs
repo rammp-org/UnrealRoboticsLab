@@ -93,13 +93,17 @@ public class URLab : ModuleRules
 			"Chaos",
 			"Landscape",
 			"Eigen",
-			"DesktopPlatform",
-			// rpclib: msgpack-cxx headers (clmdep_msgpack namespace) +
-			// pre-built static rpc.lib. Used by MjMsgpackHelpers for
-			// the step server's binary wire format. JSON fallback is
-			// kept for debugging via the hello "encoding" flag.
-			"RPCLib"
+			"DesktopPlatform"
 		});
+
+		// rpclib: only its bundled msgpack-cxx headers (clmdep_msgpack
+		// namespace), which are header-only. Used by MsgpackHelpers for the
+		// step server's binary wire format; JSON fallback is kept for
+		// debugging via the hello "encoding" flag. Nothing calls rpc:: itself,
+		// so the headers are taken without linking the engine's prebuilt
+		// librpc, which ships for Win64, Mac and x86_64 Linux but not
+		// LinuxArm64.
+		PrivateIncludePathModuleNames.Add("RPCLib");
 
 		DynamicallyLoadedModuleNames.AddRange(new string[]
 		{
@@ -114,7 +118,7 @@ public class URLab : ModuleRules
 				"user32.lib"
 			});
 		}
-		else if (Target.Platform == UnrealTargetPlatform.Linux)
+		else if (Target.Platform.IsInGroup(UnrealPlatformGroup.Linux))
 		{
 			PublicSystemLibraries.AddRange(new string[]
 			{
@@ -180,7 +184,7 @@ public class URLab : ModuleRules
 		if (!Directory.Exists(IncludePath) || !Directory.Exists(LibPath))
 		{
 			Console.WriteLine(
-				"URLab: ProtoSpec is not installed under third_party/install/protospec - " +
+				"URLab: ProtoSpec is not installed under " + Root + " - " +
 				"building without the generated MuJoCo spec profile. Run " +
 				"protospec/build.ps1 (Windows) or protospec/build.sh (Linux) to enable it.");
 			PublicDefinitions.Add("URLAB_PROTOSPEC=0");
@@ -224,14 +228,22 @@ public class URLab : ModuleRules
 		get
 		{
 			// Windows->Linux cross-compilation reads Linux-built third-party
-			// artifacts from install-linux/ (produced by the host project's
-			// Scripts/build_all_linux_cross.ps1). A separate root is required
-			// because each dep build wipes its own install dir, so Linux and
-			// Windows artifacts sharing install/ would clobber each other.
-			if (Target.Platform == UnrealTargetPlatform.Linux &&
-				BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64)
+			// artifacts from install-linux/ (x86_64) or install-linuxarm64/
+			// (aarch64), produced by the host project's
+			// Scripts/build_all_linux_cross.ps1. A separate root per target is
+			// required because each dep build wipes its own install dir, so
+			// artifacts for different targets sharing one root would clobber
+			// each other.
+			if (BuildHostPlatform.Current.Platform == UnrealTargetPlatform.Win64)
 			{
-				return Path.Combine(PluginDirectory, "third_party", "install-linux");
+				if (Target.Platform == UnrealTargetPlatform.Linux)
+				{
+					return Path.Combine(PluginDirectory, "third_party", "install-linux");
+				}
+				if (Target.Platform == UnrealTargetPlatform.LinuxArm64)
+				{
+					return Path.Combine(PluginDirectory, "third_party", "install-linuxarm64");
+				}
 			}
 			return Path.Combine(PluginDirectory, "third_party", "install");
 		}
@@ -289,7 +301,7 @@ public class URLab : ModuleRules
 				}
 			}
 		}
-		else if (Target.Platform == UnrealTargetPlatform.Linux)
+		else if (Target.Platform.IsInGroup(UnrealPlatformGroup.Linux))
 		{
 			// On Linux the URLab plugin .so already gets `${ORIGIN}` added to
 			// its RPATH by UBT, so the runtime loader resolves third-party
