@@ -93,13 +93,17 @@ public class URLab : ModuleRules
 			"Chaos",
 			"Landscape",
 			"Eigen",
-			"DesktopPlatform",
-			// rpclib: msgpack-cxx headers (clmdep_msgpack namespace) +
-			// pre-built static rpc.lib. Used by MjMsgpackHelpers for
-			// the step server's binary wire format. JSON fallback is
-			// kept for debugging via the hello "encoding" flag.
-			"RPCLib"
+			"DesktopPlatform"
 		});
+
+		// rpclib: only its bundled msgpack-cxx headers (clmdep_msgpack
+		// namespace), which are header-only. Used by MsgpackHelpers for the
+		// step server's binary wire format; JSON fallback is kept for
+		// debugging via the hello "encoding" flag. Nothing calls rpc:: itself,
+		// so the headers are taken without linking the engine's prebuilt
+		// librpc, which ships for Win64, Mac and x86_64 Linux but not
+		// LinuxArm64.
+		PrivateIncludePathModuleNames.Add("RPCLib");
 
 		DynamicallyLoadedModuleNames.AddRange(new string[]
 		{
