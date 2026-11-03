@@ -116,6 +116,9 @@ synthy_bridge/logs/
 synthy_bridge/.venv/
 synthy_bridge/g1_test_trajectory.csv
 third_party/install/
+# Windows->Linux cross-compiled installs (see ThirdPartyPath in URLab.Build.cs).
+third_party/install-linux/
+third_party/install-linuxarm64/
 # Each third_party/<dep>/src/ is a git submodule (see .gitmodules). The
 # submodule checkout itself is tracked via the submodule pointer; only the
 # per-build scratch directories inside each submodule are ignored.

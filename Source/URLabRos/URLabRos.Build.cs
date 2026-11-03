@@ -66,7 +66,7 @@ public class URLabRos : ModuleRules
 			"Json"
 		});
 
-		if (Target.Platform == UnrealTargetPlatform.Linux)
+		if (Target.Platform.IsInGroup(UnrealPlatformGroup.Linux))
 		{
 			PublicSystemLibraries.AddRange(new string[] { "pthread", "dl", "rt" });
 		}
@@ -183,7 +183,7 @@ public class URLabRos : ModuleRules
 			};
 			StageRosRuntime(BinDir, DllPatterns, true);
 		}
-		else if (Target.Platform == UnrealTargetPlatform.Linux)
+		else if (Target.Platform.IsInGroup(UnrealPlatformGroup.Linux))
 		{
 			foreach (string Name in LinkNames)
 			{
