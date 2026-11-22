@@ -481,6 +481,15 @@ private:
 	void ArmLockedStepping();
 	/** Disarms the lock and drops any granted steps (the worker then runs on its own). */
 	void StopLockedStepping();
+	// urlab.LockedFrameSeconds below 0 (matched): each batch is the real time its frame took (NoteMatchedFrame, every
+	// post-tick; at most 1/20 s), in whole steps with the remainder carried (MatchedSteps, at a grant).
+	void NoteMatchedFrame();
+	int32 MatchedSteps(double Dt);
+	void ResetMatched();
+	double MatchedLastWall = 0.0;
+	uint64 MatchedLastFrame = 0;
+	double MatchedFrameWall = 0.0;
+	double MatchedCarry = 0.0;
 	FDelegateHandle PreActorTickHandle;
 	FDelegateHandle PostActorTickHandle;
 	/** Batches granted to the worker (it has finished UMjPhysicsEngine::LockedBatchesDone of them). */

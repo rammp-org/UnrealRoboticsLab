@@ -69,8 +69,15 @@ static TAutoConsoleVariable<float> CVarUrlabLockedFrameSeconds(
 		TEXT("between the frame's actor ticks, so every actor tick reads the state at the end of one whole batch and every ")
 			TEXT("command lands on the next batch's first step, whatever the frame rate; the simulation then runs at the ")
 				TEXT("batch length times the frame rate (slow motion on slow frames). 0, the default: MuJoCo runs on its own, ")
-					TEXT("paced to the wall clock. Set back to 0 by the manager if a granted batch stops making progress."),
+					TEXT("paced to the wall clock. Below 0: matched, each batch as long as the real time the frame took (at ")
+						TEXT("most 1/20 s: a hitch is let go, not caught up; a step's remainder carried to the next), so the ")
+							TEXT("simulation keeps to real time and actors still read whole batches -- but how much physics a frame ")
+								TEXT("holds follows the frame rate again. Set back to 0 by the manager if a granted batch stops making ")
+									TEXT("progress."),
 	ECVF_Default);
+
+// The most real time one frame adds to a matched batch (urlab.LockedFrameSeconds below 0).
+static constexpr double kMatchedMaxFrameSec = 1.0 / 20.0;
 
 // How long the game thread waits on a granted batch that takes no step before it turns locked stepping off.
 static constexpr double kLockedStallTimeoutSec = 2.0;
@@ -246,7 +253,7 @@ void AAMjManager::BeginPlay()
 	// (whatever unpauses it, and whenever).
 	PreActorTickHandle = FWorldDelegates::OnWorldPreActorTick.AddUObject(this, &AAMjManager::OnWorldPreActorTick);
 	PostActorTickHandle = FWorldDelegates::OnWorldPostActorTick.AddUObject(this, &AAMjManager::OnWorldPostActorTick);
-	if (PhysicsEngine && CVarUrlabLockedFrameSeconds.GetValueOnGameThread() > 0.0f)
+	if (PhysicsEngine && CVarUrlabLockedFrameSeconds.GetValueOnGameThread() != 0.0f)
 	{
 		ArmLockedStepping();
 	}
@@ -891,6 +898,45 @@ void AAMjManager::ArmLockedStepping()
 	PhysicsEngine->bLockedStepping.store(true, std::memory_order_release);
 }
 
+void AAMjManager::NoteMatchedFrame()
+{
+	// The real time this frame took, from the last post-tick to this one (whatever the frame cap, reached or not),
+	// times the engine's Sim Speed (as the unlocked pacer honours it). A frame longer than kMatchedMaxFrameSec counts
+	// as that long: a hitch -- the PIE start, a GC, a breakpoint -- is let go rather than caught up, and a scene whose
+	// batch is its own frame's bottleneck stops lengthening it there. A frame that grants nothing (paused, waiting)
+	// adds nothing: the next one replaces it. Nor does a gap in the post-ticks themselves (the world paused, a PIE
+	// frame advance): the first frame after one starts afresh rather than counting the gap.
+	const double Now = FPlatformTime::Seconds();
+	const bool bContinuous = MatchedLastWall > 0.0 && GFrameCounter == MatchedLastFrame + 1;
+	const double Speed = FMath::Clamp(PhysicsEngine->SimSpeedAtomic.load(std::memory_order_acquire), 5.0f, 100.0f) / 100.0;
+	MatchedFrameWall = bContinuous ? FMath::Min(Now - MatchedLastWall, kMatchedMaxFrameSec) * Speed : 0.0;
+	MatchedLastWall = Now;
+	MatchedLastFrame = GFrameCounter;
+}
+
+int32 AAMjManager::MatchedSteps(double Dt)
+{
+	// This frame's real time in whole steps, the remainder carried to the next batch, so physics keeps to the wall
+	// clock with no drift from the rounding. Under half a step: none this frame (the next carries it), so frames
+	// shorter than a step never run the simulation faster than real time.
+	MatchedCarry += MatchedFrameWall;
+	const int32 Steps = FMath::RoundToInt(MatchedCarry / Dt);
+	if (Steps < 1)
+	{
+		return 0;
+	}
+	MatchedCarry = FMath::Clamp(MatchedCarry - Steps * Dt, -Dt, Dt);
+	return Steps;
+}
+
+void AAMjManager::ResetMatched()
+{
+	MatchedLastWall = 0.0;
+	MatchedLastFrame = 0;
+	MatchedFrameWall = 0.0;
+	MatchedCarry = 0.0;
+}
+
 void AAMjManager::StopLockedStepping()
 {
 	if (PhysicsEngine && PhysicsEngine->bLockedStepping.exchange(false, std::memory_order_acq_rel))
@@ -908,10 +954,20 @@ void AAMjManager::OnWorldPostActorTick(UWorld* World, ELevelTick TickType, float
 		return;
 	}
 	const float Seconds = CVarUrlabLockedFrameSeconds.GetValueOnGameThread();
-	if (Seconds <= 0.0f)
+	if (Seconds == 0.0f)
 	{
 		StopLockedStepping();
+		ResetMatched();
 		return;
+	}
+	// Matched (below 0): every frame's real time measured here, granted or not, so a grant knows its own frame.
+	if (Seconds < 0.0f)
+	{
+		NoteMatchedFrame();
+	}
+	else
+	{
+		ResetMatched();
 	}
 	// Armed whatever the worker is doing (paused, not started, between models, a client stepping it), so it never
 	// steps on the wall clock: an unpause, a (re)start or a return to live waits for the next grant.
@@ -965,7 +1021,11 @@ void AAMjManager::OnWorldPostActorTick(UWorld* World, ELevelTick TickType, float
 	{
 		return;
 	}
-	const int32 Steps = FMath::Max(1, FMath::RoundToInt(Seconds / Dt));
+	const int32 Steps = Seconds > 0.0f ? FMath::Max(1, FMath::RoundToInt(Seconds / Dt)) : MatchedSteps(Dt);
+	if (Steps < 1)
+	{
+		return; // matched, and under half a step of real time so far: the next frame carries it
+	}
 	++LockedBatchesGranted;
 	PhysicsEngine->bLockedBatchFresh.store(true, std::memory_order_release); // before the budget the worker waits on
 	PhysicsEngine->LockedStepBudget.store(Steps, std::memory_order_release);

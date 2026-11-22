@@ -72,7 +72,10 @@ bool FMjFrameLockedStepping::RunTest(const FString& Parameters)
 	constexpr int32 N = 7;
 	Var->Set((float)(N * Dt), ECVF_SetByConsole);
 
+	// One engine frame: its number moves on (matched mode tells consecutive frames from a gap by it), then the two
+	// handlers in the order the world calls them.
 	auto Frame = [&]() {
+		++GFrameCounter;
 		S.Manager->OnWorldPreActorTick(World, LEVELTICK_All, 0.016f);
 		S.Manager->OnWorldPostActorTick(World, LEVELTICK_All, 0.016f);
 	};
@@ -224,6 +227,48 @@ bool FMjFrameLockedStepping::RunTest(const FString& Parameters)
 	}
 	TestTrue(TEXT("the lock held through the waits"), Engine->bLockedStepping.load() && Var->GetFloat() > 0.0f);
 	TestTrue(TEXT("the last long batch finishes"), WaitForBatches(Engine, Granted));
+	Var->Set((float)(N * Dt), ECVF_SetByConsole);
+
+	// Matched (below 0): each batch is the real time its frame took, so physics keeps to the wall clock over many
+	// frames whatever their length; a hitch is let go (at most 1/20 s of physics), not caught up.
+	Var->Set(-1.0f, ECVF_SetByConsole);
+	Frame(); // publishes the last long batch; the first matched frame has measured nothing, so grants nothing
+	TestTrue(TEXT("matched: the lock stays on"), Engine->bLockedStepping.load());
+	TestEqual(TEXT("matched: nothing granted before a frame is measured"), Engine->LockedStepBudget.load(), 0);
+	const double MatchedSimStart = LiveSimTime(Engine);
+	const double MatchedWallStart = FPlatformTime::Seconds();
+	for (int32 K = 0; K < 12; ++K)
+	{
+		FPlatformProcess::Sleep(K % 2 ? 0.015f : 0.035f); // uneven frames
+		Frame();
+		++Granted;
+		TestTrue(TEXT("matched: the batch finishes"), WaitForBatches(Engine, Granted));
+	}
+	const double MatchedWall = FPlatformTime::Seconds() - MatchedWallStart;
+	const double MatchedSim = LiveSimTime(Engine) - MatchedSimStart;
+	TestTrue(FString::Printf(TEXT("matched: physics keeps to real time (%.3f s of physics in %.3f s)"), MatchedSim, MatchedWall),
+		FMath::Abs(MatchedSim - MatchedWall) < 0.2 * MatchedWall + 4 * Dt);
+	FPlatformProcess::Sleep(0.3f); // a hitch
+	const double BeforeHitch = LiveSimTime(Engine);
+	Frame();
+	++Granted;
+	TestTrue(TEXT("matched: the batch after a hitch finishes"), WaitForBatches(Engine, Granted));
+	TestTrue(FString::Printf(TEXT("matched: a hitch is let go (%.3f s of physics after 0.3 s)"), LiveSimTime(Engine) - BeforeHitch),
+		LiveSimTime(Engine) - BeforeHitch <= 1.0 / 20.0 + 2 * Dt + 1e-9);
+	// A gap in the frames themselves (the world paused, so no post-ticks ran) starts afresh rather than counting it:
+	// at most the carried remainder, one step.
+	FPlatformProcess::Sleep(0.03f);
+	GFrameCounter += 10;
+	const double BeforeGap = LiveSimTime(Engine);
+	Frame();
+	const bool bGapGrant = Engine->LockedStepBudget.load() > 0 || Engine->LockedBatchesDone.load() > Granted;
+	if (bGapGrant)
+	{
+		++Granted;
+		WaitForBatches(Engine, Granted);
+	}
+	TestTrue(FString::Printf(TEXT("matched: a gap in the frames is not counted (%.3f s of physics)"), LiveSimTime(Engine) - BeforeGap),
+		LiveSimTime(Engine) - BeforeGap <= Dt + 1e-9);
 	Var->Set((float)(N * Dt), ECVF_SetByConsole);
 
 	// Turned off: the worker runs on its own again.
