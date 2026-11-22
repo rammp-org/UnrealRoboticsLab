@@ -161,6 +161,36 @@ public:
 	 *  const operation on the snapshot and a request for the one after it. */
 	mutable std::atomic<bool> bSnapshotWanted{true};
 
+	// --- Frame-locked stepping (live mode; AAMjManager drives it from urlab.LockedFrameSeconds) ---
+	//
+	// Off (the default), the live worker runs on its own, paced to the wall clock, and the game thread reads whatever
+	// snapshot it last published: up to a frame old, and its commands land on whichever step is under way. Locked
+	// (armed), the running worker steps only the steps the game thread grants (LockedStepBudget), unpaced -- every
+	// pre-step callback, ApplyControls and post-step callback still runs for each -- publishes none of them, counts
+	// the batch done (LockedBatchesDone, waking LockedBatchEvent) and idles until the next grant. The manager waits for
+	// the batch before the actors tick, publishes and applies its last step's state, and grants the next batch after
+	// they tick, so every actor tick reads the state at the end of exactly N steps, and every command it sends lands
+	// on the next batch's first step, whatever the frame rate. The lock stays armed through a pause (a paused worker
+	// runs its usual paced iterations, and the rest of a batch it interrupted is held until a frame boundary releases
+	// it, bLockedBatchHeld), so an unpause never free-runs.
+
+	/** Locked stepping armed (the manager sets it each frame). */
+	std::atomic<bool> bLockedStepping{false};
+	/** Steps left in the batch the game thread granted. */
+	std::atomic<int32> LockedStepBudget{0};
+	/** Batches the worker has finished (their last granted step stepped; counted under CallbackMutex). */
+	std::atomic<uint64> LockedBatchesDone{0};
+	/** The rest of a batch a pause interrupted, held until the manager releases it between frames (an unpause in
+	 *  the middle of the actor ticks does not resume it there). */
+	std::atomic<bool> bLockedBatchHeld{false};
+	/** Set with each grant, taken by the batch's first step: only that step takes the queued commands (mocap poses,
+	 *  wrenches; see DrainCommands), so one queued from anywhere, mid-batch included, lands on a batch's first step.
+	 *  Controls written straight into the articulations from outside the actor ticks (a live-mode RPC step's ctrl)
+	 *  and an RPC reset are not queued: they take effect at whichever step is under way. */
+	std::atomic<bool> bLockedBatchFresh{false};
+	/** Triggered as a batch finishes (a wake-up only: LockedBatchesDone is what counts). */
+	FEvent* LockedBatchEvent = nullptr;
+
 	/** Worker-thread only. Reset at the top of each worker iteration; a step
 	 *  handler that publishes the render snapshot itself (direct mode captures
 	 *  its exact frame id for the reply) sets this so the loop tail does not
@@ -585,8 +615,11 @@ private:
 	/** Drains PendingCommands into m_data. Must be called by the
 	 *  stepping thread while it already holds CallbackMutex. Returns true
 	 *  iff it applied at least one command, so the caller can treat a mocap
-	 *  / wrench edit as a state advance (publish it) even while paused. */
-	bool DrainCommands();
+	 *  / wrench edit as a state advance (publish it) even while paused.
+	 *  bTakeQueue false leaves the queue for later (frame-locked stepping
+	 *  takes it only on a batch's first step) and only writes the held
+	 *  wrenches back. */
+	bool DrainCommands(bool bTakeQueue = true);
 };
 
 /**

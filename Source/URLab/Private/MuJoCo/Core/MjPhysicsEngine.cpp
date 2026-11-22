@@ -165,6 +165,7 @@ UMjPhysicsEngine::UMjPhysicsEngine()
 
 	// Auto-reset so each Trigger arms exactly one Wait; coalesces bursts.
 	StepRequestEvent = FPlatformProcess::GetSynchEventFromPool(false);
+	LockedBatchEvent = FPlatformProcess::GetSynchEventFromPool(false);
 
 	URLab_InstallMujocoCallbacks();
 }
@@ -210,6 +211,11 @@ void UMjPhysicsEngine::BeginDestroy()
 	{
 		FPlatformProcess::ReturnSynchEventToPool(StepRequestEvent);
 		StepRequestEvent = nullptr;
+	}
+	if (bWorkerExited && LockedBatchEvent)
+	{
+		FPlatformProcess::ReturnSynchEventToPool(LockedBatchEvent);
+		LockedBatchEvent = nullptr;
 	}
 	Super::BeginDestroy();
 }
@@ -1023,6 +1029,25 @@ void UMjPhysicsEngine::RunMujocoAsync()
 			// without a per-iteration actor cast.
 			const EStepMode Mode = ResolvedStepMode.load(std::memory_order_acquire);
 
+			// Frame-locked stepping (live mode only; see bLockedStepping): running with no steps granted, or with
+			// the rest of a batch held, idle outside CallbackMutex until the game thread grants (or releases) them.
+			// A short wait keeps pause, stop and the lock being turned off responsive. Paused, the loop runs its usual
+			// paced iterations (edits still publish). This is only the idle gate: whether this iteration steps is
+			// decided again under the lock.
+			if (Mode == EStepMode::Live && bLockedStepping.load(std::memory_order_acquire)
+				&& !bPausedAtomic.load(std::memory_order_acquire)
+				&& (LockedStepBudget.load(std::memory_order_acquire) <= 0
+					|| bLockedBatchHeld.load(std::memory_order_acquire)))
+			{
+				if (StepRequestEvent)
+					StepRequestEvent->Wait(2);
+				continue;
+			}
+			// This iteration steps under the lock (armed and running), so takes only granted steps and is unpaced.
+			bool bLocked = false;
+			// Set by the step that uses the batch's last granted step: the batch is counted done.
+			bool bLockedBatchEnd = false;
+
 			// Real-time pacer interval. Read from the model under CallbackMutex
 			// below (a concurrent CompileModel frees m_model, so reading it
 			// outside the lock races the delete); re-read per iteration so
@@ -1037,6 +1062,13 @@ void UMjPhysicsEngine::RunMujocoAsync()
 					break;
 
 				TargetInterval = (float)m_model->opt.timestep;
+
+				// One read of pause and of the lock for the whole iteration, taken under the lock: a pause or an
+				// unpause (StepSync's included), or the lock turned on or off since the idle gate, cannot let an
+				// ungranted step through, and an armed worker never steps on the wall clock.
+				const bool bPausedNow = bPausedAtomic.load(std::memory_order_acquire);
+				const bool bArmed = (Mode == EStepMode::Live) && bLockedStepping.load(std::memory_order_acquire);
+				bLocked = bArmed && !bPausedNow;
 
 				// Did mjData actually change this iteration? Only then do we
 				// publish a render snapshot (which bumps FrameId and drives
@@ -1146,11 +1178,22 @@ void UMjPhysicsEngine::RunMujocoAsync()
 					}
 				}
 
-				// A mocap/wrench edit mutates m_data even while paused, so it
-				// counts as an advance (publish it).
-				bAdvanced |= DrainCommands();
+				// Locked, this iteration steps only with a granted step left
+				// and the batch not held.
+				const bool bStepNow = !bPausedNow
+								   && (!bLocked
+									   || (LockedStepBudget.load(std::memory_order_acquire) > 0
+										   && !bLockedBatchHeld.load(std::memory_order_acquire)));
 
-				if (!bPausedAtomic.load(std::memory_order_acquire))
+				// A mocap/wrench edit mutates m_data even while paused, so it
+				// counts as an advance (publish it). Locked, the queue is taken
+				// only by a batch's first step (bLockedBatchFresh): a command
+				// queued while a batch runs waits for the next one's start.
+				const bool bTakeQueue = !bLocked
+									 || (bStepNow && bLockedBatchFresh.exchange(false, std::memory_order_acq_rel));
+				bAdvanced |= DrainCommands(bTakeQueue);
+
+				if (bStepNow)
 				{
 					if (CustomStepHandler)
 					{
@@ -1169,6 +1212,16 @@ void UMjPhysicsEngine::RunMujocoAsync()
 						if (OnPostStep)
 							OnPostStep(m_model, m_data);
 						bAdvanced = true;
+					}
+					// Locked: each stepping iteration spends one granted step
+					// (a live-mode handler that did no work spends it too, so a
+					// batch always ends). Only the step that spends the last one
+					// ends the batch: one under way when the game thread dropped
+					// the budget (the lock turned off, a stall) spent nothing it
+					// was granted, so is never counted as a batch.
+					if (bLocked)
+					{
+						bLockedBatchEnd = LockedStepBudget.fetch_sub(1, std::memory_order_acq_rel) == 1;
 					}
 				}
 
@@ -1191,16 +1244,34 @@ void UMjPhysicsEngine::RunMujocoAsync()
 				// publish only when it asked (bSnapshotWanted) instead of
 				// copying the full snapshot every physics step; direct/puppet
 				// publish every step because the client associates frames by id.
+				// Locked: no step publishes. The game thread publishes the
+				// finished batch itself, at the start of the next frame's actor
+				// ticks (AAMjManager::OnWorldPreActorTick), so the snapshot
+				// changes only at that frame boundary and every reader in a
+				// frame sees the batch its actors saw.
 				if (bAdvanced && !bRenderStatePublishedThisStep)
 				{
 					const bool bWantPublish = (Mode != EStepMode::Live)
-										   || bSnapshotWanted.exchange(false, std::memory_order_acq_rel);
+										   || (!bLocked && bSnapshotWanted.exchange(false, std::memory_order_acq_rel));
 					if (bWantPublish)
 					{
 						PushRenderState();
 					}
 				}
+
+				// Counted under the lock, after the batch's last step and its
+				// post-step callbacks: a game thread holding CallbackMutex sees
+				// a batch either still to finish or finished and counted.
+				if (bLockedBatchEnd)
+				{
+					LockedBatchesDone.fetch_add(1, std::memory_order_acq_rel);
+				}
 			} // FScopeLock released here
+
+			if (bLockedBatchEnd && LockedBatchEvent)
+			{
+				LockedBatchEvent->Trigger();
+			}
 
 			// End-of-iteration pacing.
 			//
@@ -1217,7 +1288,10 @@ void UMjPhysicsEngine::RunMujocoAsync()
 			// Pace off the resolved mode, not the configured StepMode (which
 			// defaults to Auto). Auto resolves to Live, so a freshly-started
 			// live session runs real-time instead of blocking at ~10 Hz.
-			const bool bUseRealTimePacing = (Mode == EStepMode::Live);
+			// Locked: no pacing -- a granted batch runs flat out, and the game
+			// frame paces the batches (N steps per frame). Armed but paused
+			// iterations pace as any paused live iteration does.
+			const bool bUseRealTimePacing = (Mode == EStepMode::Live) && !bLocked;
 			if (bUseRealTimePacing)
 			{
 				const float SpeedFactor = FMath::Clamp(SimSpeedAtomic.load(std::memory_order_acquire), 5.0f, 100.0f) / 100.0f;
@@ -1232,7 +1306,7 @@ void UMjPhysicsEngine::RunMujocoAsync()
 					FPlatformProcess::YieldThread();
 				}
 			}
-			else if (StepRequestEvent)
+			else if (!bLocked && StepRequestEvent)
 			{
 				// 100ms timeout: cap shutdown latency without polling hot.
 				StepRequestEvent->Wait(100);
@@ -1740,7 +1814,7 @@ void UMjPhysicsEngine::ApplyActuatorGear(int32 ActuatorId, TConstArrayView<doubl
 		m_model->actuator_gear[ActuatorId * 6 + i] = Gear[i];
 }
 
-bool UMjPhysicsEngine::DrainCommands()
+bool UMjPhysicsEngine::DrainCommands(bool bTakeQueue)
 {
 	if (!m_model || !m_data)
 		return false;
@@ -1761,7 +1835,7 @@ bool UMjPhysicsEngine::DrainCommands()
 	FCommandQueue Local;
 	{
 		FScopeLock Lock(&CommandMutex);
-		if (PendingCommands.IsEmpty())
+		if (!bTakeQueue || PendingCommands.IsEmpty())
 		{
 			WriteHeld();
 			return false;

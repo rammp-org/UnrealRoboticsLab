@@ -465,4 +465,28 @@ public:
 	/** Restore is scheduled for the next physics step (not applied immediately). */
 	UFUNCTION(BlueprintCallable, Category = "MuJoCo|Snapshot")
 	void RestoreSnapshot(UMjSimulationState* Snapshot);
+
+	// --- Frame-locked stepping (urlab.LockedFrameSeconds; UMjPhysicsEngine::bLockedStepping) ---
+	//
+	// Before the frame's actors tick: wait for the batch granted after the last frame's, then publish and apply its
+	// last step's state (so every actor, and every other reader that frame, sees the state at the end of exactly that
+	// batch). After they tick: grant the next batch of round(LockedFrameSeconds / timestep) steps, which the worker
+	// runs while the frame renders. Bound to FWorldDelegates in BeginPlay; public for the headless tests, which skip
+	// BeginPlay and play a frame by calling the two in turn.
+	void OnWorldPreActorTick(UWorld* World, ELevelTick TickType, float DeltaSeconds);
+	void OnWorldPostActorTick(UWorld* World, ELevelTick TickType, float DeltaSeconds);
+
+private:
+	/** Arms the lock with nothing granted (the worker idles until the first grant). */
+	void ArmLockedStepping();
+	/** Disarms the lock and drops any granted steps (the worker then runs on its own). */
+	void StopLockedStepping();
+	FDelegateHandle PreActorTickHandle;
+	FDelegateHandle PostActorTickHandle;
+	/** Batches granted to the worker (it has finished UMjPhysicsEngine::LockedBatchesDone of them). */
+	uint64 LockedBatchesGranted = 0;
+	/** Finished batches whose state has been published (the last one counted in LockedBatchesDone). */
+	uint64 LockedBatchesPublished = 0;
+	/** This frame's batch was applied before the actors ticked: Tick does not apply the same state again. */
+	bool bLockedStateApplied = false;
 };

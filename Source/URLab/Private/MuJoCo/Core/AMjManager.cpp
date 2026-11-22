@@ -39,6 +39,8 @@
 #include "mujoco/mujoco.h"
 
 #include "Kismet/GameplayStatics.h"
+#include "Engine/World.h"
+#include "HAL/IConsoleManager.h"
 #include "Blueprint/UserWidget.h"
 #include "Transport/ZmqPublishTransport.h"
 #include "Transport/ZmqSubscribeTransport.h"
@@ -59,6 +61,21 @@
 #if WITH_EDITOR
 #include "Misc/MessageDialog.h"
 #endif
+
+// Frame-locked stepping: see UMjPhysicsEngine::bLockedStepping and AAMjManager::OnWorldPostActorTick.
+static TAutoConsoleVariable<float> CVarUrlabLockedFrameSeconds(
+	TEXT("urlab.LockedFrameSeconds"), 0.0f,
+	TEXT("Frame-locked stepping (live mode). Above 0: MuJoCo steps exactly round(this / timestep) steps per game frame, ")
+		TEXT("between the frame's actor ticks, so every actor tick reads the state at the end of one whole batch and every ")
+			TEXT("command lands on the next batch's first step, whatever the frame rate; the simulation then runs at the ")
+				TEXT("batch length times the frame rate (slow motion on slow frames). 0, the default: MuJoCo runs on its own, ")
+					TEXT("paced to the wall clock. Set back to 0 by the manager if a granted batch stops making progress."),
+	ECVF_Default);
+
+// How long the game thread waits on a granted batch that takes no step before it turns locked stepping off.
+static constexpr double kLockedStallTimeoutSec = 2.0;
+// The most one poll of that wait counts towards it (the polls are 1 ms apart; a longer gap is the process suspended).
+static constexpr double kLockedPollShareMaxSec = 0.01;
 
 AAMjManager* AAMjManager::Instance = nullptr;
 
@@ -223,6 +240,16 @@ void AAMjManager::BeginPlay()
 		return;
 	}
 	Instance = this;
+
+	// Frame-locked stepping (urlab.LockedFrameSeconds): off unless the console variable is set; the handlers decide
+	// each frame. Armed now if it is set, before the worker starts below, so the worker never takes an ungranted step
+	// (whatever unpauses it, and whenever).
+	PreActorTickHandle = FWorldDelegates::OnWorldPreActorTick.AddUObject(this, &AAMjManager::OnWorldPreActorTick);
+	PostActorTickHandle = FWorldDelegates::OnWorldPostActorTick.AddUObject(this, &AAMjManager::OnWorldPostActorTick);
+	if (PhysicsEngine && CVarUrlabLockedFrameSeconds.GetValueOnGameThread() > 0.0f)
+	{
+		ArmLockedStepping();
+	}
 
 	// Auto-create ReplayManager BEFORE the dispatcher / ZMQ components so the
 	// dispatcher's Init can cache its pointer. (Transport worker threads later
@@ -648,6 +675,13 @@ void AAMjManager::FanOutStateSnapshot(mjModel* m, mjData* d)
 
 void AAMjManager::EndPlay(const EEndPlayReason::Type EndPlayReason)
 {
+	FWorldDelegates::OnWorldPreActorTick.Remove(PreActorTickHandle);
+	FWorldDelegates::OnWorldPostActorTick.Remove(PostActorTickHandle);
+	PreActorTickHandle.Reset();
+	PostActorTickHandle.Reset();
+	// The worker free again before it is told to stop (a locked worker idles on the step event, which wakes it).
+	StopLockedStepping();
+
 	// Stop the physics async thread BEFORE Super::EndPlay so PostStep
 	// callbacks don't race into resources child components tear down.
 	// Bounded wait: a pathological mj_step can take many seconds; an
@@ -743,7 +777,202 @@ void AAMjManager::Tick(float DeltaTime)
 		return;
 	}
 
+	// Locked stepping applied this frame's batch before the actors ticked: the state is the same.
+	if (bLockedStateApplied)
+	{
+		bLockedStateApplied = false;
+		return;
+	}
 	ApplyLatestRenderState();
+}
+
+void AAMjManager::OnWorldPreActorTick(UWorld* World, ELevelTick TickType, float DeltaSeconds)
+{
+	bLockedStateApplied = false;
+	if (World != GetWorld() || !PhysicsEngine || !PhysicsEngine->IsInitialized()
+		|| !PhysicsEngine->bLockedStepping.load(std::memory_order_acquire))
+	{
+		return;
+	}
+	if (PhysicsEngine->GetStepMode() != EStepMode::Live)
+	{
+		// A client took over the stepping (direct / puppet) since the last grant: it publishes its own frames. Drop
+		// the batch but stay armed, so a return to live waits for a grant rather than running on the wall clock.
+		ArmLockedStepping();
+		return;
+	}
+	// Wait for the batch granted after the last frame's actor ticks. Nothing finishes a batch while paused, out of
+	// live mode (the worker steps only live batches), stopping or with the worker gone: this frame reads as unlocked
+	// then (Tick applies whatever is published), and an unfinished batch finishes once the worker steps it again.
+	// Stalled is the time spent waiting with no step taken, a poll's share capped, so a debugger break or a suspended
+	// process (both threads frozen together) is not taken for a stuck worker.
+	double Stalled = 0.0;
+	double LastPoll = FPlatformTime::Seconds();
+	int32 LastBudget = PhysicsEngine->LockedStepBudget.load(std::memory_order_acquire);
+	while (PhysicsEngine->LockedBatchesDone.load(std::memory_order_acquire) < LockedBatchesGranted)
+	{
+		if (PhysicsEngine->bPausedAtomic.load(std::memory_order_acquire))
+		{
+			// A pause interrupted the batch: hold the rest until a frame boundary releases it (the next unpaused
+			// pre-tick or post-tick), so an unpause during this frame's actor ticks does not run it under them.
+			PhysicsEngine->bLockedBatchHeld.store(true, std::memory_order_release);
+			return;
+		}
+		if (PhysicsEngine->GetStepMode() != EStepMode::Live)
+		{
+			ArmLockedStepping(); // a client took over mid-batch: drop the rest, as above
+			return;
+		}
+		if (PhysicsEngine->bShouldStopTask || !PhysicsEngine->bWorkerRunning.load(std::memory_order_acquire))
+		{
+			return;
+		}
+		// Unpaused at a frame boundary: a batch a pause held runs on now, and this wait finishes it before any actor
+		// ticks. (Released on the same read of the pause that let the wait go on, so an unpause racing this cannot
+		// leave the wait on a held batch. An unpause during the actor ticks leaves it to the post-tick.)
+		if (PhysicsEngine->bLockedBatchHeld.exchange(false, std::memory_order_acq_rel) && PhysicsEngine->StepRequestEvent)
+		{
+			PhysicsEngine->StepRequestEvent->Trigger();
+		}
+		// A long batch is fine while it is stepping; one that takes no step for the timeout is stuck.
+		const double Now = FPlatformTime::Seconds();
+		const int32 Budget = PhysicsEngine->LockedStepBudget.load(std::memory_order_acquire);
+		Stalled += FMath::Min(Now - LastPoll, kLockedPollShareMaxSec);
+		LastPoll = Now;
+		if (Budget != LastBudget)
+		{
+			LastBudget = Budget;
+			Stalled = 0.0;
+		}
+		else if (Stalled > kLockedStallTimeoutSec)
+		{
+			UE_LOG(LogURLab, Error,
+				TEXT("[AAMjManager] urlab.LockedFrameSeconds: a granted batch took no step for %.1f s (%d of its steps ")
+					TEXT("left); frame-locked stepping is off and the variable is set back to 0 (set it again to retry)."),
+				kLockedStallTimeoutSec, Budget);
+			StopLockedStepping();
+			if (IConsoleVariable* Var = CVarUrlabLockedFrameSeconds.AsVariable())
+			{
+				Var->Set(0.0f, ECVF_SetByConsole);
+			}
+			return;
+		}
+		if (PhysicsEngine->LockedBatchEvent)
+		{
+			PhysicsEngine->LockedBatchEvent->Wait(1);
+		}
+	}
+	// No batch is outstanding now: a hold set as a pause met the batch's last step in flight holds nothing.
+	PhysicsEngine->bLockedBatchHeld.store(false, std::memory_order_release);
+	// Publish the finished batch here, not from the worker at its last step: the snapshot then changes only at this
+	// frame boundary, so every game-thread reader in the frame (actor ticks, render, Slate) sees the batch the actors
+	// saw. The worker is idle outside CallbackMutex between batches, so the lock is uncontended.
+	const uint64 Done = PhysicsEngine->LockedBatchesDone.load(std::memory_order_acquire);
+	if (Done != LockedBatchesPublished)
+	{
+		FScopeLock Lock(&PhysicsEngine->CallbackMutex);
+		PhysicsEngine->PushRenderState();
+		LockedBatchesPublished = Done;
+	}
+	ApplyLatestRenderState();
+	bLockedStateApplied = true;
+}
+
+void AAMjManager::ArmLockedStepping()
+{
+	// Count from the worker's own count, nothing granted yet; the worker idles until the first grant. (A locked
+	// iteration still under way finishes uncounted: it spends no step from the zeroed budget. One that ended a batch
+	// just before can count it after this read; OnWorldPostActorTick resyncs the grant count then.)
+	PhysicsEngine->LockedStepBudget.store(0, std::memory_order_release);
+	PhysicsEngine->bLockedBatchHeld.store(false, std::memory_order_release);
+	PhysicsEngine->bLockedBatchFresh.store(false, std::memory_order_release);
+	LockedBatchesGranted = PhysicsEngine->LockedBatchesDone.load(std::memory_order_acquire);
+	LockedBatchesPublished = LockedBatchesGranted;
+	PhysicsEngine->bLockedStepping.store(true, std::memory_order_release);
+}
+
+void AAMjManager::StopLockedStepping()
+{
+	if (PhysicsEngine && PhysicsEngine->bLockedStepping.exchange(false, std::memory_order_acq_rel))
+	{
+		PhysicsEngine->LockedStepBudget.store(0, std::memory_order_release);
+		PhysicsEngine->bLockedBatchHeld.store(false, std::memory_order_release);
+		PhysicsEngine->bLockedBatchFresh.store(false, std::memory_order_release);
+	}
+}
+
+void AAMjManager::OnWorldPostActorTick(UWorld* World, ELevelTick TickType, float DeltaSeconds)
+{
+	if (World != GetWorld() || !PhysicsEngine)
+	{
+		return;
+	}
+	const float Seconds = CVarUrlabLockedFrameSeconds.GetValueOnGameThread();
+	if (Seconds <= 0.0f)
+	{
+		StopLockedStepping();
+		return;
+	}
+	// Armed whatever the worker is doing (paused, not started, between models, a client stepping it), so it never
+	// steps on the wall clock: an unpause, a (re)start or a return to live waits for the next grant.
+	if (PhysicsEngine->GetStepMode() != EStepMode::Live)
+	{
+		ArmLockedStepping(); // and nothing granted while a client steps it
+		return;
+	}
+	if (!PhysicsEngine->bLockedStepping.load(std::memory_order_acquire))
+	{
+		ArmLockedStepping();
+	}
+	if (!PhysicsEngine->IsInitialized() || !PhysicsEngine->bWorkerRunning.load(std::memory_order_acquire)
+		|| PhysicsEngine->bPausedAtomic.load(std::memory_order_acquire))
+	{
+		return;
+	}
+	// The rest of a batch a pause interrupted runs now, between frames, like any batch; no new grant over it. (A
+	// hold over a batch that has since finished holds nothing: the grant goes ahead.)
+	if (PhysicsEngine->bLockedBatchHeld.exchange(false, std::memory_order_acq_rel)
+		&& PhysicsEngine->LockedBatchesDone.load(std::memory_order_acquire) < LockedBatchesGranted)
+	{
+		if (PhysicsEngine->StepRequestEvent)
+		{
+			PhysicsEngine->StepRequestEvent->Trigger();
+		}
+		return;
+	}
+	// The model's timestep now, not as the worker last saw it: a set_sim_options or a recompile since the last batch
+	// sizes this one. The worker is between iterations while this holds CallbackMutex, so the batch count read after
+	// it is exact (the worker counts a batch under the lock).
+	double Dt = 0.0;
+	{
+		FScopeLock Lock(&PhysicsEngine->CallbackMutex);
+		if (PhysicsEngine->m_model)
+		{
+			Dt = PhysicsEngine->m_model->opt.timestep;
+		}
+	}
+	const uint64 Done = PhysicsEngine->LockedBatchesDone.load(std::memory_order_acquire);
+	if (Done > LockedBatchesGranted)
+	{
+		// A batch the worker counted after the lock was (re)armed: count it as granted; the next pre-tick publishes it.
+		UE_LOG(LogURLab, Log, TEXT("[AAMjManager] urlab.LockedFrameSeconds: %llu batch(es) finished after the lock was armed; resynced."),
+			Done - LockedBatchesGranted);
+		LockedBatchesGranted = Done;
+	}
+	// No grant over the last batch while it is unfinished or finished but not yet published (it finished after this
+	// frame's pre-tick wait gave up): the next pre-tick publishes it, so a frame never advances by two batches.
+	if (Done < LockedBatchesGranted || Done != LockedBatchesPublished || Dt <= 0.0)
+	{
+		return;
+	}
+	const int32 Steps = FMath::Max(1, FMath::RoundToInt(Seconds / Dt));
+	++LockedBatchesGranted;
+	PhysicsEngine->bLockedBatchFresh.store(true, std::memory_order_release); // before the budget the worker waits on
+	PhysicsEngine->LockedStepBudget.store(Steps, std::memory_order_release);
+	if (PhysicsEngine->StepRequestEvent)
+	{
+		PhysicsEngine->StepRequestEvent->Trigger();
+	}
 }
 
 void AAMjManager::ApplyLatestRenderState()
@@ -948,6 +1177,14 @@ void AAMjManager::ResetSimulation()
 {
 	if (PhysicsEngine)
 	{
+		// Locked: the rest of a batch under way, or one a pause holds, belongs to the old episode; the next grant
+		// starts the new one with a whole batch (the reset is applied on its first step). Game thread only (the
+		// counters are the game thread's): a caller on another thread (an RPC replay_start) only gets here out of
+		// live mode, where the handlers re-arm every frame anyway.
+		if (IsInGameThread() && PhysicsEngine->bLockedStepping.load(std::memory_order_acquire))
+		{
+			ArmLockedStepping();
+		}
 		PhysicsEngine->ResetSimulation();
 	}
 	UE_LOG(LogURLab, Log, TEXT("MuJoCo Manager: Reset requested."));
@@ -960,6 +1197,13 @@ UMjSimulationState* AAMjManager::CaptureSnapshot()
 
 void AAMjManager::RestoreSnapshot(UMjSimulationState* Snapshot)
 {
-	if (PhysicsEngine)
+	if (PhysicsEngine && Snapshot)
+	{
+		// Locked: as ResetSimulation, the restored state starts a whole batch.
+		if (IsInGameThread() && PhysicsEngine->bLockedStepping.load(std::memory_order_acquire))
+		{
+			ArmLockedStepping();
+		}
 		PhysicsEngine->RestoreSnapshot(Snapshot);
+	}
 }
